@@ -23,6 +23,53 @@ SHORTLISTED_HEADLINES_PATH = Path(__file__).resolve().parents[1] / "shortlisted_
 MAX_SHORTLISTED_HEADLINES = 15
 INSTAGRAM_CAPTION_LIMIT = 2200
 ENGAGEMENT_CTA = "Like, share and follow"
+HASHTAG_MIN_COUNT = 5
+HASHTAG_MAX_COUNT = 15
+GENERIC_STORY_WORDS = {
+    "about",
+    "after",
+    "against",
+    "amid",
+    "announced",
+    "announces",
+    "around",
+    "before",
+    "being",
+    "break",
+    "breaking",
+    "country",
+    "development",
+    "during",
+    "first",
+    "from",
+    "government",
+    "india",
+    "indian",
+    "into",
+    "latest",
+    "major",
+    "more",
+    "news",
+    "official",
+    "officials",
+    "over",
+    "report",
+    "reports",
+    "said",
+    "says",
+    "story",
+    "that",
+    "their",
+    "there",
+    "these",
+    "this",
+    "today",
+    "update",
+    "updates",
+    "were",
+    "which",
+    "with",
+}
 
 
 def _safe_name(value: str) -> str:
@@ -78,7 +125,38 @@ def _get_event_summary(story: dict) -> str:
     )
 
 
-def _validate_generated_plan(plan: dict) -> None:
+def _story_keywords(text: str) -> set[str]:
+    return {
+        word.casefold()
+        for word in re.findall(r"[^\W_]+", text, flags=re.UNICODE)
+        if len(word) >= 3 and word.casefold() not in GENERIC_STORY_WORDS
+    }
+
+
+def _validate_no_recent_story_overlap(plan: dict, previous_summaries: list[str]) -> None:
+    story = plan["selected_story"]
+    current_keywords = _story_keywords(
+        f"{story['title']} {_get_event_summary(story)}"
+    )
+    if len(current_keywords) < 2:
+        return
+    for previous_summary in previous_summaries:
+        previous_keywords = _story_keywords(previous_summary)
+        if len(previous_keywords) < 2:
+            continue
+        shared_keywords = current_keywords & previous_keywords
+        overlap_ratio = len(shared_keywords) / min(len(current_keywords), len(previous_keywords))
+        if len(shared_keywords) >= 2 and overlap_ratio >= 0.5:
+            raise ValueError(
+                "Groq selected a story with substantially overlapping main keywords "
+                f"from shortlisted history: {previous_summary!r}."
+            )
+
+
+def _validate_generated_plan(
+    plan: dict,
+    previous_summaries: list[str] | None = None,
+) -> None:
     story = plan.get("selected_story")
     if not isinstance(story, dict):
         raise ValueError("Groq Reel plan must include a selected_story object.")
@@ -106,18 +184,36 @@ def _validate_generated_plan(plan: dict) -> None:
         )
     if description.casefold().count(ENGAGEMENT_CTA.casefold()) > 1:
         raise ValueError('"Like, share and follow" must appear only once in the description.')
+    hashtags = plan.get("hashtags")
+    if not isinstance(hashtags, list) or not HASHTAG_MIN_COUNT <= len(hashtags) <= HASHTAG_MAX_COUNT:
+        raise ValueError("Groq Reel plan must include 5 to 15 relevant hashtags.")
+    if any(
+        not isinstance(hashtag, str)
+        or not re.fullmatch(r"#[^\s#]+", hashtag)
+        for hashtag in hashtags
+    ):
+        raise ValueError("Every Groq hashtag must be a single valid hashtag starting with #.")
+    if len({hashtag.casefold() for hashtag in hashtags}) != len(hashtags):
+        raise ValueError("Groq hashtags must be unique.")
+    prepared_caption = _prepare_description(plan)
+    if len(prepared_caption) > INSTAGRAM_CAPTION_LIMIT:
+        raise ValueError(
+            f"Groq description and hashtags together must fit Instagram's "
+            f"{INSTAGRAM_CAPTION_LIMIT}-character caption limit."
+        )
     sources = plan.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("Groq Reel plan must include at least one source.")
+    _validate_no_recent_story_overlap(plan, previous_summaries or [])
 
 
-def _make_ai_client() -> CloudAIResearcher:
+def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResearcher:
     api_keys = getattr(settings, "groq_api_keys", (settings.groq_api_key,))
     return CloudAIResearcher(
         settings.ai_provider,
         api_keys,
         settings.groq_model,
-        plan_validator=_validate_generated_plan,
+        plan_validator=lambda plan: _validate_generated_plan(plan, previous_summaries),
     )
 
 
@@ -154,6 +250,9 @@ def _prepare_description(plan: dict) -> str:
     description = plan["description"].strip()
     if ENGAGEMENT_CTA.casefold() not in description.casefold():
         description = f"{description.rstrip()}\n\n{ENGAGEMENT_CTA}"
+    hashtags = plan.get("hashtags", [])
+    if hashtags:
+        description = f"{description.rstrip()}\n\n{' '.join(hashtags)}"
     if len(description) > INSTAGRAM_CAPTION_LIMIT:
         raise ValueError(
             f"Instagram description exceeds the {INSTAGRAM_CAPTION_LIMIT}-character limit "
@@ -189,7 +288,7 @@ def run_pipeline(text_only: bool = False) -> Path:
 
     log.info("[1/4] Groq searching current India news and creating one image Reel plan...")
     previous_summaries = _read_shortlisted_summaries(SHORTLISTED_HEADLINES_PATH)
-    plan = _make_ai_client().research_and_generate_plan(
+    plan = _make_ai_client(previous_summaries).research_and_generate_plan(
         build_news_and_post_plan_prompt(previous_summaries),
         9000,
         run_dir / "groq_response.txt",

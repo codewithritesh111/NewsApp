@@ -220,6 +220,7 @@ class TrendPipelineTests(unittest.TestCase):
             ),
             "background_image_prompt": "A clean editorial illustration with clear space for text.",
             "description": "A useful, factual description of the current news.",
+            "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
             "sources": [{"url": "https://news.example/story"}],
         }
         client = CloudAIResearcher(
@@ -259,6 +260,7 @@ class TrendPipelineTests(unittest.TestCase):
             ),
             "background_image_prompt": "A relevant editorial illustration.",
             "description": "A factual news description.",
+            "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
             "sources": [{"url": "https://news.example/story"}],
         }
 
@@ -277,6 +279,68 @@ class TrendPipelineTests(unittest.TestCase):
         plan["sources"] = []
         with self.assertRaisesRegex(ValueError, "at least one source"):
             _validate_generated_plan(plan)
+
+    def test_plan_validator_requires_five_to_fifteen_unique_valid_hashtags(self):
+        plan = {
+            "selected_story": {
+                "title": "A verified current news development",
+                "event_summary": "A verified current news development affects local residents",
+            },
+            "category": "Technology",
+            "headline": "A verified current news update",
+            "image_body": (
+                "The latest verified update changes the way affected people access this service, "
+                "with officials confirming the main decision today. The next steps will determine "
+                "how quickly people and businesses feel its practical impact across India."
+            ),
+            "background_image_prompt": "A relevant editorial illustration.",
+            "description": "A factual news description.",
+            "hashtags": ["#News", "#India", "#Technology", "#Update"],
+            "sources": [{"url": "https://news.example/story"}],
+        }
+        with self.assertRaisesRegex(ValueError, "5 to 15 relevant hashtags"):
+            _validate_generated_plan(plan)
+
+        plan["hashtags"].append("#PublicInterest")
+        _validate_generated_plan(plan)
+
+        plan["hashtags"][-1] = "#news"
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            _validate_generated_plan(plan)
+
+        plan["hashtags"][-1] = "#Hashtag With Spaces"
+        with self.assertRaisesRegex(ValueError, "single valid hashtag"):
+            _validate_generated_plan(plan)
+
+    def test_plan_validator_rejects_repeated_main_keywords_from_history(self):
+        plan = {
+            "selected_story": {
+                "title": "ISRO successfully test fires GSLV rocket engine",
+                "event_summary": "ISRO tests GSLV rocket engine ahead of NVS 04 launch",
+            },
+            "category": "Technology",
+            "headline": "ISRO Tests GSLV Engine",
+            "image_body": (
+                "ISRO successfully completed a ground test of the GSLV rocket engine, "
+                "an important step toward preparing the launch vehicle for the upcoming "
+                "navigation satellite mission and its planned launch schedule."
+            ),
+            "background_image_prompt": "A rocket engine editorial illustration.",
+            "description": "A factual update. Like, share and follow",
+            "hashtags": ["#ISRO", "#GSLV", "#Rocket", "#Space", "#India"],
+            "sources": [{"url": "https://news.example/story"}],
+        }
+
+        with self.assertRaisesRegex(ValueError, "overlapping main keywords"):
+            _validate_generated_plan(
+                plan,
+                ["ISRO test fires GSLV rocket engine ahead of NVS 04 launch"],
+            )
+
+        _validate_generated_plan(
+            plan,
+            ["ISRO announces a new Chandrayaan lunar science instrument"],
+        )
 
     def test_cloudflare_image_retries_only_the_failed_generation(self):
         pool = RotatingCredentialPool(
@@ -320,6 +384,7 @@ class TrendPipelineTests(unittest.TestCase):
             ),
             "background_image_prompt": "Editorial illustration",
             "description": "A clear update. Like, share and follow",
+            "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
             "sources": [{"url": "https://news.example/story"}],
         }
         previous_summaries = ["An earlier completed event affected many residents"]
@@ -595,6 +660,7 @@ class TrendPipelineTests(unittest.TestCase):
             ),
             "background_image_prompt": "Editorial illustration supporting the development",
             "description": "A clear, engaging update. Like, share and follow",
+            "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
             "sources": [{"url": "https://news.example/lead"}],
         }
 
@@ -647,6 +713,11 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertIn("geopolitics and diplomacy", prompt.lower())
             self.assertIn("500 words", prompt.lower())
             self.assertIn("see description for more detail", prompt.lower())
+            self.assertIn("latest 15 published-story summaries", prompt.lower())
+            self.assertIn("two or more distinctive keywords match", prompt.lower())
+            self.assertIn("within the last 24 hours", prompt.lower())
+            self.assertIn("audience interest is the highest priority", prompt.lower())
+            self.assertIn("5-15 unique, relevant hashtags", prompt.lower())
             self.assertIn(previous_summaries[0], prompt)
             generated_post_plan = json.loads(
                 (Path(summary["post_directory"]) / "post_plan.json").read_text(encoding="utf-8")
@@ -659,6 +730,7 @@ class TrendPipelineTests(unittest.TestCase):
             )
             self.assertEqual(len(rendered_images), 1)
             self.assertEqual(len(image_prompts), 1)
+            self.assertIn("#CurrentStory", (Path(summary["post_directory"]) / "caption.txt").read_text(encoding="utf-8"))
             self.assertEqual(generator_config[0][0], "test-account")
             self.assertEqual(rendered_images[0], ("A Current India Story", plan["image_body"], "The Daily Chronicle", 1080, 1920))
             self.assertEqual(
