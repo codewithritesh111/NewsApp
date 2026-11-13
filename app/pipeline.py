@@ -27,7 +27,6 @@ ENGAGEMENT_CTA = "Like, share and follow"
 HASHTAG_MIN_COUNT = 5
 HASHTAG_MAX_COUNT = 15
 IST = timezone(timedelta(hours=5, minutes=30), name="IST")
-PUBLISHING_RATINGS = {"HIGH", "VERY_HIGH"}
 GENERIC_STORY_WORDS = {
     "about",
     "after",
@@ -201,7 +200,15 @@ def _validate_research_result(
         raise ValueError("Groq research result must include a structured publish_assessment.")
     if type(assessment.get("eligible")) is not bool:
         raise ValueError("Publish assessment eligible must be a boolean.")
-    for field in ("public_interest", "public_attention", "recency", "significance", "uniqueness"):
+    for field in (
+        "india_wide_relevance",
+        "public_interest",
+        "public_attention",
+        "recency",
+        "significance",
+        "uniqueness",
+        "emotional_resonance",
+    ):
         rating = assessment.get(field)
         if not isinstance(rating, str) or rating not in {
             "LOW",
@@ -210,9 +217,18 @@ def _validate_research_result(
             "VERY_HIGH",
         }:
             raise ValueError(f"Publish assessment {field} must use a supported rating.")
-    if type(assessment.get("significant_new_development")) is not bool:
-        raise ValueError("Publish assessment significant_new_development must be a boolean.")
-    for field in ("reason", "new_development_summary"):
+    for field in ("thought_provoking", "significant_new_development"):
+        if type(assessment.get(field)) is not bool:
+            raise ValueError(f"Publish assessment {field} must be a boolean.")
+    if not isinstance(assessment.get("human_stakes"), str):
+        raise ValueError("Publish assessment human_stakes must be a string.")
+    for field in (
+        "reason",
+        "new_development_summary",
+        "human_stakes",
+        "india_wide_impact_evidence",
+        "emotional_resonance_evidence",
+    ):
         if not isinstance(assessment.get(field), str):
             raise ValueError(f"Publish assessment {field} must be a string.")
 
@@ -245,15 +261,26 @@ def _publish_gate_rejection_reason(
     if not assessment["eligible"]:
         reasons.append(assessment["reason"].strip() or "Groq rejected the story for publishing.")
     required_ratings = {
+        "india_wide_relevance": {"VERY_HIGH"},
         "public_interest": {"VERY_HIGH"},
         "public_attention": {"VERY_HIGH"},
-        "recency": PUBLISHING_RATINGS,
-        "significance": PUBLISHING_RATINGS,
-        "uniqueness": PUBLISHING_RATINGS,
+        "recency": {"VERY_HIGH"},
+        "significance": {"VERY_HIGH"},
+        "uniqueness": {"VERY_HIGH"},
+        "emotional_resonance": {"VERY_HIGH"},
     }
     for field, accepted in required_ratings.items():
         if assessment[field] not in accepted:
             reasons.append(f"{field.replace('_', ' ').capitalize()} assessment is below the publishing threshold.")
+    if not assessment["thought_provoking"]:
+        reasons.append("The story does not have a substantiated thought-provoking angle.")
+    for field, label in (
+        ("human_stakes", "specific human stakes"),
+        ("india_wide_impact_evidence", "evidence of India-wide impact"),
+        ("emotional_resonance_evidence", "evidence of authentic emotional resonance"),
+    ):
+        if not assessment[field].strip():
+            reasons.append(f"The story lacks {label}.")
 
     event_time = _parse_event_timestamp(assessment.get("actual_event_at"))
     now = datetime.now(timezone.utc)
@@ -453,6 +480,10 @@ def run_pipeline(
     log.info("[PUBLISH GATE] Public attention: %s", assessment["public_attention"])
     log.info("[PUBLISH GATE] Significance: %s", assessment["significance"])
     log.info("[PUBLISH GATE] Uniqueness: %s", assessment["uniqueness"])
+    log.info("[PUBLISH GATE] India-wide relevance: %s", assessment["india_wide_relevance"])
+    log.info("[PUBLISH GATE] Thought-provoking: %s", assessment["thought_provoking"])
+    log.info("[PUBLISH GATE] Emotional resonance: %s", assessment["emotional_resonance"])
+    log.info("[PUBLISH GATE] Human stakes: %s", assessment["human_stakes"])
     rejection_reason = _publish_gate_rejection_reason(result, previous_summaries)
     if rejection_reason:
         log.info("[PUBLISH GATE] Decision: REJECTED")

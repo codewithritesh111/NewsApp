@@ -37,11 +37,17 @@ def _approve_test_plan(plan: dict) -> dict:
     plan["selected_story"]["actual_event_at"] = event_time
     plan["publish_assessment"] = {
         "eligible": True,
+        "india_wide_relevance": "VERY_HIGH",
         "public_interest": "VERY_HIGH",
         "public_attention": "VERY_HIGH",
         "recency": "VERY_HIGH",
         "significance": "VERY_HIGH",
-        "uniqueness": "HIGH",
+        "uniqueness": "VERY_HIGH",
+        "thought_provoking": True,
+        "emotional_resonance": "VERY_HIGH",
+        "human_stakes": "A verified development has meaningful effects on families across India.",
+        "india_wide_impact_evidence": "Official data confirms the policy applies nationwide.",
+        "emotional_resonance_evidence": "The confirmed outcome gives affected families reason for hope.",
         "actual_event_at": event_time,
         "significant_new_development": False,
         "new_development_summary": "",
@@ -59,7 +65,9 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertIn("compare all category finalists", prompt)
         self.assertIn("highest-ranked available story", prompt)
         self.assertIn("this ranking does not mean it qualifies for publication", prompt.lower())
-        self.assertIn("public_interest and public_attention are very_high", prompt.lower())
+        self.assertIn("are all very_high", prompt.lower())
+        self.assertIn("india_wide_relevance", prompt.lower())
+        self.assertIn("emotional_resonance", prompt.lower())
         for category in NEWS_CATEGORIES:
             self.assertIn(f'"{category}"', prompt)
 
@@ -397,6 +405,24 @@ class TrendPipelineTests(unittest.TestCase):
         )
 
         result["publish_assessment"]["public_interest"] = "VERY_HIGH"
+        result["publish_assessment"]["india_wide_relevance"] = "HIGH"
+        self.assertIn(
+            "India wide relevance assessment is below the publishing threshold.",
+            _publish_gate_rejection_reason(result, []),
+        )
+        result["publish_assessment"]["india_wide_relevance"] = "VERY_HIGH"
+        result["publish_assessment"]["emotional_resonance"] = "HIGH"
+        self.assertIn(
+            "Emotional resonance assessment is below the publishing threshold.",
+            _publish_gate_rejection_reason(result, []),
+        )
+        result["publish_assessment"]["emotional_resonance"] = "VERY_HIGH"
+        result["publish_assessment"]["thought_provoking"] = False
+        self.assertIn(
+            "thought-provoking angle",
+            _publish_gate_rejection_reason(result, []),
+        )
+        result["publish_assessment"]["thought_provoking"] = True
         result["publish_assessment"]["actual_event_at"] = "2020-01-01T00:00:00Z"
         self.assertIn(
             "older than 24 hours",
@@ -415,11 +441,17 @@ class TrendPipelineTests(unittest.TestCase):
             },
             "publish_assessment": {
                 "eligible": False,
+                "india_wide_relevance": "LOW",
                 "public_interest": "LOW",
                 "public_attention": "LOW",
                 "recency": "HIGH",
                 "significance": "LOW",
                 "uniqueness": "HIGH",
+                "thought_provoking": False,
+                "emotional_resonance": "LOW",
+                "human_stakes": "",
+                "india_wide_impact_evidence": "",
+                "emotional_resonance_evidence": "",
                 "actual_event_at": datetime.now(timezone.utc).isoformat(),
                 "significant_new_development": False,
                 "new_development_summary": "",
