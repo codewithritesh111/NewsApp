@@ -70,7 +70,7 @@ The workflow at `.github/workflows/scheduled-instagram.yml` publishes at these I
 
 | India time (IST) | GitHub Actions cron (UTC) |
 |---|---|
-| 08:50 | `20 3 * * *` |
+| 09:21 | `51 3 * * *` |
 | 09:50 | `20 4 * * *` |
 | 11:50 | `20 6 * * *` |
 | 14:50 | `20 9 * * *` |

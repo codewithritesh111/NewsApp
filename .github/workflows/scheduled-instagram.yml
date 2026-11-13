@@ -2,8 +2,10 @@ name: Scheduled Instagram Reels
 
 on:
   schedule:
-    # 08:50, 09:50, 11:50, 14:50, and 17:50 IST.
-    - cron: "20 3,4,6,9,12 * * *"
+    # 09:21 IST.
+    - cron: "51 3 * * *"
+    # 09:50, 11:50, 14:50, and 17:50 IST.
+    - cron: "20 4,6,9,12 * * *"
     # 19:30 and 21:00 IST.
     - cron: "0 14 * * *"
     - cron: "30 15 * * *"
