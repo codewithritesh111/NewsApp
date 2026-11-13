@@ -17,6 +17,7 @@ from app.images.reel_encoder import create_static_reel, select_bgm_track
 from app.images.image_composer import _normalise_display_text
 from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
+from app.intelligence.news_researcher import NEWS_CATEGORIES, build_news_and_post_plan_prompt
 from app.pipeline import (
     _generate_background,
     _get_event_summary,
@@ -26,6 +27,17 @@ from app.pipeline import (
 
 
 class TrendPipelineTests(unittest.TestCase):
+    def test_news_prompt_requires_category_shortlist_then_global_comparison(self):
+        prompt = build_news_and_post_plan_prompt()
+
+        self.assertIn("evaluate each supported category", prompt)
+        self.assertIn("single strongest candidate as that category's finalist", prompt)
+        self.assertIn("compare all category finalists against one another", prompt)
+        self.assertIn("combined potential to attract public attention", prompt)
+        self.assertIn("compelling balance of impact, public interest and timeliness", prompt)
+        for category in NEWS_CATEGORIES:
+            self.assertIn(f'"{category}"', prompt)
+
     def test_multiple_credentials_are_parsed_and_cloudflare_pairs_stay_aligned(self):
         with patch.dict(
             os.environ,
