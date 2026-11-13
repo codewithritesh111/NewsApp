@@ -4,7 +4,7 @@ The pipeline uses Groq browser search to find and compare current news, Cloudfla
 
 ## What the pipeline creates
 
-1. Groq researches current, credible news relevant to Indian audiences in two stages: it selects the strongest eligible candidate within each supported category, then compares those category finalists to choose one story with the strongest combined impact, public interest, and timeliness. Stories must be reported or materially updated within the last 24 hours; any older event must have an important, verifiable new development during that period. Duplicate screening compares distinctive words in each candidate's title and event summary against all 15 retained story summaries, and rejects stories with substantial overlap. The rolling history is updated only after image and Reel generation succeed; text-only runs and failed media generation do not update it.
+1. Groq browser search collects and ranks current candidates in two stages: it selects the strongest candidate within each supported category, then compares the finalists. A separate structured publishing gate requires VERY_HIGH public interest and public attention, HIGH or VERY_HIGH recency, significance, and uniqueness, plus a verified actual development within 24 hours. A top-ranked story may still be rejected. Rejected stories are logged and recorded as `skipped_publish_gate`; image, caption, upload, and Instagram publishing are skipped and the workflow exits successfully. Duplicate screening compares distinctive words against the latest 15 posted-story summaries, allowing overlap only when a significant new development is reported. The history is updated after successful media generation.
 2. Groq assigns each selected story exactly one category: **Politics, Geopolitics, Crime, Technology, Business, Defence, Other, Government schemes, Social trends, Major Sad Event,** or **Major Good Event**. Audience interest is the top editorial priority: select verified stories people are likely to find interesting, useful, enjoyable, discuss and share, while avoiding clickbait. The plan includes a concise image headline and explanation, a supporting illustration prompt, source metadata, a description of no more than 500 words, and 5–15 unique relevant hashtags appended to the Instagram caption.
 3. Cloudflare creates the illustration background. Pillow lays out the story headline, short explanation, “See description for more detail,” and “Like, share and follow” on a 1080×1920 image. The story category is used for BGM selection but is not printed on the image.
 4. The still image is encoded as a 15-second, 30-fps H.264 MP4. The app searches `BGM` for an audio filename matching the selected category, ignoring case and spaces (for example, `Major Sad Event` matches `majorsadevent.mp3`). If no category match exists, it uses a supported audio file named `Other` such as `Other.m4a`. The selected audio loops or is trimmed to fill the Reel; the image does not pan or animate.
@@ -64,21 +64,18 @@ An already-generated Reel with a Cloudinary URL in its `post_plan.json` can be p
 python -m app.main --publish-instagram --post-dir "output\2026-11-12_19-55-26\best_news_a-current-india-story"
 ```
 
-## Schedule publishing with GitHub Actions
+## Half-hourly news monitoring with GitHub Actions
 
-The workflow at `.github/workflows/scheduled-instagram.yml` publishes at these IST times:
+The workflow at `.github/workflows/scheduled-instagram.yml` runs every 30 minutes from 08:00 through 20:00 IST inclusive. Its UTC cron entries are:
 
-| India time (IST) | GitHub Actions cron (UTC) |
-|---|---|
-| 09:30 | `0 4 * * *` |
-| 09:50 | `20 4 * * *` |
-| 11:50 | `20 6 * * *` |
-| 14:50 | `20 9 * * *` |
-| 17:50 | `20 12 * * *` |
-| 19:30 | `0 14 * * *` |
-| 21:00 | `30 15 * * *` |
+```cron
+30 2-14 * * *
+0 3-14 * * *
+```
 
-Add the project to a **private GitHub repository**, commit and push the workflow to its default branch, then add these repository Actions secrets under **Settings → Secrets and variables → Actions**:
+Together these run at 02:30 UTC, then every 30 minutes through 14:30 UTC (08:00–20:00 IST). Each run independently researches news; only stories passing the strict gate continue to Reel generation and the existing publishing workflow. A rejected story exits with status 0 and is recorded in `output/<run>/run_summary.json`; `groq_response.txt` contains the structured assessment and the logs include candidate counts, ratings, and the decision. Manual **Run workflow** is still available and follows the same gate.
+
+Configure these repository Actions secrets under **Settings → Secrets and variables → Actions**:
 
 - `GROQ_API_KEY` or `GROQ_API_KEYS`
 - Either `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, or matching comma-separated `CLOUDFLARE_ACCOUNT_IDS` and `CLOUDFLARE_API_TOKENS`
@@ -87,9 +84,9 @@ Add the project to a **private GitHub repository**, commit and push the workflow
 
 Optional repository variables under **Settings → Secrets and variables → Actions → Variables** are `GROQ_MODEL`, `INSTAGRAM_GRAPH_API_VERSION`, and `BRAND_NAME`. The workflow defaults the model to `openai/gpt-oss-20b`, Graph API version to `v27.0`, and brand to `The Daily Chronicle`.
 
-Commit the `BGM` directory and `shortlisted_headlines.json` to the private repository as well. After each run, the workflow commits shortlist changes back to the default branch using its `GITHUB_TOKEN`; workflow permissions must allow contents write, and branch rules must permit that bot push. This preserves duplicate detection between fresh hosted runners. Generated `output/` files are ignored and are not committed.
+Commit the `BGM` directory and `shortlisted_headlines.json` to the repository as well. After a successful publish, the workflow commits shortlist changes back to the default branch using its `GITHUB_TOKEN`; workflow permissions must allow contents write, and branch rules must permit that bot push. This preserves duplicate detection between fresh hosted runners. Generated `output/` files are ignored and are not committed.
 
-GitHub schedule expressions use UTC. Scheduled workflows can start later than the requested minute during GitHub load, and only run from the default branch. **Run workflow** is available for a manual run, but it also publishes a public Reel. Private-repository Actions usage is subject to the included minutes for your GitHub plan and may incur charges if you exceed them. Each scheduled run publishes a public Reel.
+GitHub schedule expressions use UTC. Scheduled workflows can start later than the requested minute during GitHub load, and only run from the default branch. Every eligible automated or manual run can publish a public Reel; manual dispatch is not a dry run.
 
 ## Output files
 

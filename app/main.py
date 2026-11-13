@@ -42,17 +42,13 @@ def _publish_reel(
     return media_id
 
 
-def _publish_generated_pipeline_run() -> tuple[Path, str]:
-    _require_instagram_settings()
-    if settings.cloudinary_settings is None:
-        raise ValueError(
-            "A full Instagram publishing run requires CLOUDINARY_CLOUD_NAME, "
-            "CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET."
-        )
-
-    run_dir = run_pipeline()
+def _publish_generated_pipeline_run() -> tuple[Path, str | None]:
+    run_dir = run_pipeline(require_publish_configuration=True)
     summary_path = run_dir / "run_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if summary.get("status") == "skipped_publish_gate":
+        return run_dir, None
+    _require_instagram_settings()
     post_dir = Path(summary["post_directory"])
     video_url = summary.get("public_video_url")
     if not isinstance(video_url, str) or not video_url.startswith("https://"):
@@ -76,6 +72,7 @@ def _publish_generated_pipeline_run() -> tuple[Path, str]:
 
 
 def _publish_existing_reel(post_dir: Path) -> str:
+    _require_instagram_settings()
     plan_path = post_dir / "post_plan.json"
     if not plan_path.is_file():
         raise FileNotFoundError(f"Reel plan not found: {plan_path}")
@@ -145,9 +142,11 @@ def main() -> None:
         if args.publish_instagram:
             if args.text_only:
                 parser.error("--text-only cannot be combined with --publish-instagram.")
-            _require_instagram_settings()
             if args.post_dir is None:
                 run_dir, media_id = _publish_generated_pipeline_run()
+                if media_id is None:
+                    print(f"\nInstagram publishing intentionally skipped. Pipeline output: {run_dir}")
+                    return
                 print(f"\nInstagram Reel published. Media ID: {media_id}")
                 print(f"Pipeline output: {run_dir}")
                 return

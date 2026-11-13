@@ -43,7 +43,7 @@ class MainCliTests(unittest.TestCase):
                 publisher_class.return_value.publish_reel.return_value = "12345"
                 main()
 
-            pipeline.assert_called_once_with()
+            pipeline.assert_called_once_with(require_publish_configuration=True)
             publisher_class.return_value.publish_reel.assert_called_once_with(
                 "https://res.cloudinary.com/demo/reel.mp4",
                 description,
@@ -53,23 +53,26 @@ class MainCliTests(unittest.TestCase):
             self.assertEqual(saved_summary["instagram_publishing"], "PUBLISHED")
             self.assertEqual(saved_summary["instagram_media_id"], "12345")
 
-    def test_publish_flag_requires_cloudinary_before_running_pipeline(self):
-        fake_settings = SimpleNamespace(
-            instagram_user_id="123456",
-            instagram_access_token="private-token",
-            instagram_graph_api_version="v27.0",
-            cloudinary_settings=None,
-        )
-        with (
-            patch("sys.argv", ["app.main", "--publish-instagram"]),
-            patch("app.main.settings", fake_settings),
-            patch("app.main.run_pipeline") as pipeline,
-        ):
-            with self.assertRaises(SystemExit) as exit_error:
+    def test_publish_flag_treats_gate_rejection_as_successful_skip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir()
+            (run_dir / "run_summary.json").write_text(
+                json.dumps({"status": "skipped_publish_gate"}),
+                encoding="utf-8",
+            )
+            with (
+                patch("sys.argv", ["app.main", "--publish-instagram"]),
+                patch(
+                    "app.main.run_pipeline",
+                    return_value=run_dir,
+                ) as pipeline,
+                patch("app.main.InstagramPublisher") as publisher_class,
+            ):
                 main()
 
-        self.assertEqual(exit_error.exception.code, 1)
-        pipeline.assert_not_called()
+            pipeline.assert_called_once_with(require_publish_configuration=True)
+            publisher_class.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

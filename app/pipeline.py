@@ -1,7 +1,8 @@
 import json
 import logging
+import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.config import settings
@@ -25,6 +26,8 @@ INSTAGRAM_CAPTION_LIMIT = 2200
 ENGAGEMENT_CTA = "Like, share and follow"
 HASHTAG_MIN_COUNT = 5
 HASHTAG_MAX_COUNT = 15
+IST = timezone(timedelta(hours=5, minutes=30), name="IST")
+PUBLISHING_RATINGS = {"HIGH", "VERY_HIGH"}
 GENERIC_STORY_WORDS = {
     "about",
     "after",
@@ -133,13 +136,12 @@ def _story_keywords(text: str) -> set[str]:
     }
 
 
-def _validate_no_recent_story_overlap(plan: dict, previous_summaries: list[str]) -> None:
-    story = plan["selected_story"]
+def _find_recent_story_overlap(story: dict, previous_summaries: list[str]) -> str | None:
     current_keywords = _story_keywords(
-        f"{story['title']} {_get_event_summary(story)}"
+        f"{story.get('title', '')} {story.get('event_summary', '')}"
     )
     if len(current_keywords) < 2:
-        return
+        return None
     for previous_summary in previous_summaries:
         previous_keywords = _story_keywords(previous_summary)
         if len(previous_keywords) < 2:
@@ -147,15 +149,142 @@ def _validate_no_recent_story_overlap(plan: dict, previous_summaries: list[str])
         shared_keywords = current_keywords & previous_keywords
         overlap_ratio = len(shared_keywords) / min(len(current_keywords), len(previous_keywords))
         if len(shared_keywords) >= 2 and overlap_ratio >= 0.5:
-            raise ValueError(
-                "Groq selected a story with substantially overlapping main keywords "
-                f"from shortlisted history: {previous_summary!r}."
-            )
+            return previous_summary
+    return None
+
+
+def _validate_no_recent_story_overlap(
+    plan: dict,
+    previous_summaries: list[str],
+    allow_significant_new_development: bool = False,
+) -> None:
+    overlap = _find_recent_story_overlap(plan["selected_story"], previous_summaries)
+    if overlap and not allow_significant_new_development:
+        raise ValueError(
+            "Groq selected a story with substantially overlapping main keywords "
+            f"from shortlisted history: {overlap!r}."
+        )
+
+
+def _parse_event_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_research_result(
+    result: dict,
+    previous_summaries: list[str] | None = None,
+) -> None:
+    metrics = result.get("research_metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError("Groq research result must include research_metrics.")
+    candidate_count = metrics.get("candidate_count")
+    unique_count = metrics.get("unique_candidate_count")
+    if (
+        type(candidate_count) is not int
+        or type(unique_count) is not int
+        or candidate_count < 0
+        or unique_count < 0
+        or unique_count > candidate_count
+    ):
+        raise ValueError("Groq research metrics must contain valid candidate counts.")
+
+    assessment = result.get("publish_assessment")
+    if not isinstance(assessment, dict):
+        raise ValueError("Groq research result must include a structured publish_assessment.")
+    if type(assessment.get("eligible")) is not bool:
+        raise ValueError("Publish assessment eligible must be a boolean.")
+    for field in ("public_interest", "public_attention", "recency", "significance", "uniqueness"):
+        rating = assessment.get(field)
+        if not isinstance(rating, str) or rating not in {
+            "LOW",
+            "MODERATE",
+            "HIGH",
+            "VERY_HIGH",
+        }:
+            raise ValueError(f"Publish assessment {field} must use a supported rating.")
+    if type(assessment.get("significant_new_development")) is not bool:
+        raise ValueError("Publish assessment significant_new_development must be a boolean.")
+    for field in ("reason", "new_development_summary"):
+        if not isinstance(assessment.get(field), str):
+            raise ValueError(f"Publish assessment {field} must be a string.")
+
+    story = result.get("selected_story")
+    if story is None:
+        if assessment["eligible"]:
+            raise ValueError("Groq cannot approve publishing when no story was selected.")
+        if unique_count != 0:
+            raise ValueError("Groq must select the highest-ranked current candidate when one exists.")
+        return
+    if not isinstance(story, dict) or not isinstance(story.get("title"), str) or not story["title"].strip():
+        raise ValueError("Groq selected_story must include a non-empty title or be null.")
+    if assessment["eligible"]:
+        _validate_generated_plan(
+            result,
+            previous_summaries,
+            allow_significant_new_development=(
+                assessment["significant_new_development"]
+                and bool(assessment["new_development_summary"].strip())
+            ),
+        )
+
+
+def _publish_gate_rejection_reason(
+    result: dict,
+    previous_summaries: list[str],
+) -> str | None:
+    assessment = result["publish_assessment"]
+    reasons = []
+    if not assessment["eligible"]:
+        reasons.append(assessment["reason"].strip() or "Groq rejected the story for publishing.")
+    required_ratings = {
+        "public_interest": {"VERY_HIGH"},
+        "public_attention": {"VERY_HIGH"},
+        "recency": PUBLISHING_RATINGS,
+        "significance": PUBLISHING_RATINGS,
+        "uniqueness": PUBLISHING_RATINGS,
+    }
+    for field, accepted in required_ratings.items():
+        if assessment[field] not in accepted:
+            reasons.append(f"{field.replace('_', ' ').capitalize()} assessment is below the publishing threshold.")
+
+    event_time = _parse_event_timestamp(assessment.get("actual_event_at"))
+    now = datetime.now(timezone.utc)
+    if event_time is None:
+        reasons.append("The actual event/development timestamp is missing or not a timezone-aware ISO 8601 value.")
+    else:
+        event_age = now - event_time
+        if event_age < -timedelta(minutes=5):
+            reasons.append("The reported actual event/development timestamp is in the future.")
+        elif event_age > timedelta(hours=24):
+            reasons.append("The actual event/development is older than 24 hours.")
+
+    story = result.get("selected_story")
+    if story is None:
+        reasons.append("No credible, recent news candidate was selected.")
+    else:
+        overlap = _find_recent_story_overlap(story, previous_summaries)
+        if overlap and not (
+            assessment["significant_new_development"]
+            and assessment["new_development_summary"].strip()
+            and event_time is not None
+            and now - event_time <= timedelta(hours=24)
+        ):
+            reasons.append("The story substantially overlaps a recent post without a verified significant new development.")
+    return " ".join(dict.fromkeys(reasons)) or None
 
 
 def _validate_generated_plan(
     plan: dict,
     previous_summaries: list[str] | None = None,
+    allow_significant_new_development: bool = False,
 ) -> None:
     story = plan.get("selected_story")
     if not isinstance(story, dict):
@@ -204,7 +333,11 @@ def _validate_generated_plan(
     sources = plan.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("Groq Reel plan must include at least one source.")
-    _validate_no_recent_story_overlap(plan, previous_summaries or [])
+    _validate_no_recent_story_overlap(
+        plan,
+        previous_summaries or [],
+        allow_significant_new_development,
+    )
 
 
 def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResearcher:
@@ -213,7 +346,7 @@ def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResea
         settings.ai_provider,
         api_keys,
         settings.groq_model,
-        plan_validator=lambda plan: _validate_generated_plan(plan, previous_summaries),
+        plan_validator=lambda plan: _validate_research_result(plan, previous_summaries),
     )
 
 
@@ -276,28 +409,106 @@ def _upload_reel_if_configured(
     return media.upload_video(reel_path, public_id)
 
 
-def run_pipeline(text_only: bool = False) -> Path:
-    run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+def run_pipeline(
+    text_only: bool = False,
+    require_publish_configuration: bool = False,
+) -> Path:
+    started_at = datetime.now(IST)
+    run_id = started_at.strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = settings.output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    cloudinary_settings = (
-        getattr(settings, "cloudinary_settings", None)
-        if not text_only
-        else None
+    event_name = os.getenv("GITHUB_EVENT_NAME", "local")
+    log.info(
+        "[SCHEDULE] Execution started: %s IST (%s)",
+        started_at.strftime("%Y-%m-%d %H:%M:%S"),
+        event_name,
     )
 
-    log.info("[1/4] Groq searching current India news and creating one image Reel plan...")
+    log.info("[NEWS] Fetching current candidates with Groq browser_search.")
     previous_summaries = _read_shortlisted_summaries(SHORTLISTED_HEADLINES_PATH)
-    plan = _make_ai_client(previous_summaries).research_and_generate_plan(
+    result = _make_ai_client(previous_summaries).research_and_generate_plan(
         build_news_and_post_plan_prompt(previous_summaries),
         9000,
         run_dir / "groq_response.txt",
     )
-    if not isinstance(plan, dict):
-        raise ValueError("Groq response must be a Reel-plan JSON object.")
-    _validate_generated_plan(plan)
-    story = plan["selected_story"]
-    log.info("[2/4] Selected: %s", story["title"])
+    if not isinstance(result, dict):
+        raise ValueError("Groq response must be a structured news-research JSON object.")
+    _validate_research_result(result, previous_summaries)
+    metrics = result["research_metrics"]
+    assessment = result["publish_assessment"]
+    log.info(
+        "[NEWS] Collected %d candidates, %d unique stories.",
+        metrics["candidate_count"],
+        metrics["unique_candidate_count"],
+    )
+    log.info("[GROQ] Research and ranking completed.")
+    story = result.get("selected_story")
+    if story is not None:
+        log.info("[SELECTION] Selected: %s", story["title"])
+    else:
+        log.info("[SELECTION] No candidate was eligible for ranking.")
+
+    log.info("[PUBLISH GATE] Public interest: %s", assessment["public_interest"])
+    log.info("[PUBLISH GATE] Recency: %s", assessment["recency"])
+    log.info("[PUBLISH GATE] Public attention: %s", assessment["public_attention"])
+    log.info("[PUBLISH GATE] Significance: %s", assessment["significance"])
+    log.info("[PUBLISH GATE] Uniqueness: %s", assessment["uniqueness"])
+    rejection_reason = _publish_gate_rejection_reason(result, previous_summaries)
+    if rejection_reason:
+        log.info("[PUBLISH GATE] Decision: REJECTED")
+        log.info("[PUBLISH GATE] Reason: %s", rejection_reason)
+        log.info("[PIPELINE] Skipping downstream processing. Execution completed successfully.")
+        _write_json(
+            run_dir / "run_summary.json",
+            {
+                "status": "skipped_publish_gate",
+                "run_id": run_id,
+                "execution_started_at_ist": started_at.isoformat(),
+                "ai_provider": "groq",
+                "ai_model": settings.groq_model,
+                "selection_method": "groq_browser_search",
+                "research_metrics": metrics,
+                "selected_story": story["title"] if story else None,
+                "publish_assessment": assessment,
+                "publish_decision": "REJECTED",
+                "skip_reason": rejection_reason,
+                "background_images_generated": 0,
+                "instagram_publishing": "NOT_PUBLISHED",
+            },
+        )
+        return run_dir
+
+    log.info("[PUBLISH GATE] Decision: APPROVED")
+    log.info("[PUBLISH GATE] Reason: %s", assessment["reason"])
+    plan = result
+    _validate_generated_plan(
+        plan,
+        previous_summaries,
+        allow_significant_new_development=(
+            assessment["significant_new_development"]
+            and bool(assessment["new_development_summary"].strip())
+        ),
+    )
+
+    cloudinary_settings = None
+    if not text_only:
+        cloudinary_settings = getattr(settings, "cloudinary_settings", None)
+    if require_publish_configuration:
+        missing = [
+            name
+            for name in ("instagram_user_id", "instagram_access_token", "instagram_graph_api_version")
+            if not getattr(settings, name, "")
+        ]
+        if missing:
+            raise ValueError(
+                "Instagram publishing requires these settings: "
+                + ", ".join(name.upper() for name in missing)
+            )
+        if cloudinary_settings is None:
+            raise ValueError(
+                "A full Instagram publishing run requires CLOUDINARY_CLOUD_NAME, "
+                "CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET."
+            )
 
     summary = _get_event_summary(story)
     headline = plan["headline"].strip()
@@ -367,12 +578,16 @@ def run_pipeline(text_only: bool = False) -> Path:
         {
             "status": "completed_text_only" if text_only else "completed",
             "run_id": run_id,
+            "execution_started_at_ist": started_at.isoformat(),
             "ai_provider": "groq",
             "ai_model": settings.groq_model,
             "selected_count": 1,
             "selection_method": "groq_browser_search",
+            "research_metrics": metrics,
             "selected_story": story["title"],
             "category": plan["category"],
+            "publish_assessment": assessment,
+            "publish_decision": "APPROVED",
             "bgm_file": str(bgm_path) if bgm_path else None,
             "public_video_url": public_video_url,
             "background_images_generated": generated,

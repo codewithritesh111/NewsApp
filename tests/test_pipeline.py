@@ -5,6 +5,7 @@ import struct
 import tempfile
 import unittest
 import wave
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,9 +22,32 @@ from app.intelligence.news_researcher import NEWS_CATEGORIES, build_news_and_pos
 from app.pipeline import (
     _generate_background,
     _get_event_summary,
+    _publish_gate_rejection_reason,
     _validate_generated_plan,
     run_pipeline,
 )
+
+
+def _approve_test_plan(plan: dict) -> dict:
+    event_time = datetime.now(timezone.utc).isoformat()
+    plan["research_metrics"] = {
+        "candidate_count": 25,
+        "unique_candidate_count": 18,
+    }
+    plan["selected_story"]["actual_event_at"] = event_time
+    plan["publish_assessment"] = {
+        "eligible": True,
+        "public_interest": "VERY_HIGH",
+        "public_attention": "VERY_HIGH",
+        "recency": "VERY_HIGH",
+        "significance": "VERY_HIGH",
+        "uniqueness": "HIGH",
+        "actual_event_at": event_time,
+        "significant_new_development": False,
+        "new_development_summary": "",
+        "reason": "A verified, high-impact development affects a broad audience.",
+    }
+    return plan
 
 
 class TrendPipelineTests(unittest.TestCase):
@@ -32,9 +56,10 @@ class TrendPipelineTests(unittest.TestCase):
 
         self.assertIn("evaluate each supported category", prompt)
         self.assertIn("single strongest candidate as that category's finalist", prompt)
-        self.assertIn("compare all category finalists against one another", prompt)
-        self.assertIn("combined potential to attract public attention", prompt)
-        self.assertIn("compelling balance of impact, public interest and timeliness", prompt)
+        self.assertIn("compare all category finalists", prompt)
+        self.assertIn("highest-ranked available story", prompt)
+        self.assertIn("this ranking does not mean it qualifies for publication", prompt.lower())
+        self.assertIn("public_interest and public_attention are very_high", prompt.lower())
         for category in NEWS_CATEGORIES:
             self.assertIn(f'"{category}"', prompt)
 
@@ -354,6 +379,90 @@ class TrendPipelineTests(unittest.TestCase):
             ["ISRO announces a new Chandrayaan lunar science instrument"],
         )
 
+    def test_publish_gate_requires_exceptional_ratings_and_fresh_actual_event(self):
+        result = _approve_test_plan(
+            {
+                "selected_story": {
+                    "title": "A significant current public development",
+                    "event_summary": "A significant current public development changes services",
+                },
+            }
+        )
+        self.assertIsNone(_publish_gate_rejection_reason(result, []))
+
+        result["publish_assessment"]["public_interest"] = "HIGH"
+        self.assertIn(
+            "Public interest assessment is below the publishing threshold.",
+            _publish_gate_rejection_reason(result, []),
+        )
+
+        result["publish_assessment"]["public_interest"] = "VERY_HIGH"
+        result["publish_assessment"]["actual_event_at"] = "2020-01-01T00:00:00Z"
+        self.assertIn(
+            "older than 24 hours",
+            _publish_gate_rejection_reason(result, []),
+        )
+
+    def test_rejected_publish_gate_skips_all_media_and_returns_success_summary(self):
+        result = {
+            "research_metrics": {
+                "candidate_count": 12,
+                "unique_candidate_count": 9,
+            },
+            "selected_story": {
+                "title": "A routine corporate product announcement",
+                "event_summary": "A company announced a routine consumer product launch",
+            },
+            "publish_assessment": {
+                "eligible": False,
+                "public_interest": "LOW",
+                "public_attention": "LOW",
+                "recency": "HIGH",
+                "significance": "LOW",
+                "uniqueness": "HIGH",
+                "actual_event_at": datetime.now(timezone.utc).isoformat(),
+                "significant_new_development": False,
+                "new_development_summary": "",
+                "reason": "The announcement has limited public impact.",
+            },
+        }
+
+        class FakeAI:
+            def research_and_generate_plan(self, _prompt, _max_tokens, raw_output_path):
+                raw_output_path.write_text(json.dumps(result), encoding="utf-8")
+                return result
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            headlines_path = output_dir / "shortlisted_headlines.json"
+            previous_summaries = ["An unrelated previously published public event"]
+            headlines_path.write_text(json.dumps(previous_summaries), encoding="utf-8")
+            fake_settings = SimpleNamespace(
+                output_dir=output_dir,
+                groq_model="openai/gpt-oss-20b",
+            )
+            with (
+                patch("app.pipeline.settings", fake_settings),
+                patch("app.pipeline.SHORTLISTED_HEADLINES_PATH", headlines_path),
+                patch("app.pipeline._make_ai_client", return_value=FakeAI()),
+                patch("app.pipeline._generate_background") as generate_background,
+                patch("app.pipeline.compose_news_image") as compose_image,
+                patch("app.pipeline.create_static_reel") as create_reel,
+            ):
+                run_dir = run_pipeline(require_publish_configuration=True)
+
+            summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["status"], "skipped_publish_gate")
+            self.assertEqual(summary["publish_decision"], "REJECTED")
+            self.assertEqual(summary["research_metrics"]["candidate_count"], 12)
+            self.assertEqual(summary["research_metrics"]["unique_candidate_count"], 9)
+            self.assertFalse((run_dir / "post_plan.json").exists())
+            self.assertFalse((run_dir / "caption.txt").exists())
+            self.assertEqual(json.loads(headlines_path.read_text(encoding="utf-8")), previous_summaries)
+            generate_background.assert_not_called()
+            compose_image.assert_not_called()
+            create_reel.assert_not_called()
+
     def test_cloudflare_image_retries_only_the_failed_generation(self):
         pool = RotatingCredentialPool(
             [("first-account", "first-token"), ("second-account", "second-token")],
@@ -399,6 +508,7 @@ class TrendPipelineTests(unittest.TestCase):
             "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
             "sources": [{"url": "https://news.example/story"}],
         }
+        plan = _approve_test_plan(plan)
         previous_summaries = ["An earlier completed event affected many residents"]
 
         class FakeAI:
@@ -675,6 +785,7 @@ class TrendPipelineTests(unittest.TestCase):
             "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
             "sources": [{"url": "https://news.example/lead"}],
         }
+        plan = _approve_test_plan(plan)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -716,7 +827,7 @@ class TrendPipelineTests(unittest.TestCase):
             prompt, max_tokens = requests_seen[0]
             self.assertEqual(max_tokens, 9000)
             self.assertIn("browser search", prompt.lower())
-            self.assertIn("return one selected story", prompt.lower())
+            self.assertIn("return exactly one selected story", prompt.lower())
             self.assertIn("do not force a category", prompt.lower())
             self.assertIn("compare several candidates", prompt.lower())
             self.assertIn("same underlying news event", prompt.lower())
@@ -726,7 +837,7 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertIn("500 words", prompt.lower())
             self.assertIn("see description for more detail", prompt.lower())
             self.assertIn("latest 15 published-story summaries", prompt.lower())
-            self.assertIn("two or more distinctive keywords match", prompt.lower())
+            self.assertIn("compare distinctive people, organizations", prompt.lower())
             self.assertIn("within the last 24 hours", prompt.lower())
             self.assertIn("audience interest is the highest priority", prompt.lower())
             self.assertIn("5-15 unique, relevant hashtags", prompt.lower())

@@ -2,12 +2,9 @@ name: Scheduled Instagram Reels
 
 on:
   schedule:
-    # 09:30 and 09:50 IST.
-    - cron: "0 4 * * *"
-    - cron: "20 4,6,9,12 * * *"
-    # 19:30 and 21:00 IST.
-    - cron: "0 14 * * *"
-    - cron: "30 15 * * *"
+    # 08:00, 08:30, ..., 20:00 IST (02:30-14:30 UTC).
+    - cron: "30 2-14 * * *"
+    - cron: "0 3-14 * * *"
   workflow_dispatch:
 
 permissions:
@@ -54,7 +51,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Generate and publish Reel
+      - name: Research news and publish only eligible Reels
         run: python -m app.main --publish-instagram
 
       - name: Persist duplicate-detection history
