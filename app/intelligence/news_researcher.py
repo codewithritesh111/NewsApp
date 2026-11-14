@@ -47,9 +47,9 @@ def build_news_and_post_plan_prompt(
             "including routine news."
         )
 
-    return f"""At {current_time}, browser_search for 5 latest credible, trending, high-impact India stories in {categories}. Prefer verified events from the last 5 hours; use occurrence time, not article time. Rank by recency, impact and public interest. Report actual candidate/unique counts. Verify facts, distinguish allegations, and never invent facts, counts, URLs or sources.
+    return f"""At {current_time}, browser_search for 5 latest credible, trending, high-impact India stories in {categories}. Prefer verified events from the last 5 hours; otherwise top major verified developments from the last 24 hours. Use occurrence time, not article time. Rank by recency, impact and public interest. Report actual candidate/unique counts. Verify facts, distinguish allegations, and never invent facts, counts, URLs or sources.
 
-SEARCH: Perform at most 1-2 focused searches across categories; avoid repeat queries/full pages if snippets suffice. Compare supplied history, not old stories. Stop at 5 unique candidates after verifying selected claims and event time; search more only if needed.
+SEARCH: Search across categories; avoid repeat queries/full pages if snippets suffice. Compare supplied history, not old stories. Stop at 5 unique candidates after verifying selected claims and event time.
 
 DUPES: Compare candidates with all 15 latest posted stories by event, people, organizations, places and actions—not wording. A shared distinctive name/keyword means repeat; exclude unless a source confirms a separate event; if unsure, exclude.
 {history}

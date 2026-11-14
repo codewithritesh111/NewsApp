@@ -204,7 +204,7 @@ def _make_ai_client() -> CloudAIResearcher:
         settings.groq_model,
         plan_validator=_validate_research_result,
         credential_state_path=CREDENTIAL_ROTATION_PATH,
-        reasoning_effort=getattr(settings, "groq_reasoning_effort", "low"),
+        reasoning_effort=getattr(settings, "groq_reasoning_effort", ""),
     )
 
 

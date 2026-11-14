@@ -29,7 +29,7 @@ class CloudAIResearcher:
         model: str,
         plan_validator: Callable[[dict[str, Any]], None] | None = None,
         credential_state_path: Path | None = None,
-        reasoning_effort: str = "low",
+        reasoning_effort: str = "",
     ):
         if (provider or "").strip().lower() != "groq":
             raise ValueError("This workflow requires Groq browser_search. Set AI_PROVIDER=groq.")
