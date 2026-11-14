@@ -97,11 +97,13 @@ class CloudAIResearcher:
         data: dict[str, Any],
         attempt: int,
         credential_count: int,
+        completion_limit: int,
     ) -> dict[str, Any]:
         if not isinstance(data, dict):
             return {
                 "attempt": attempt,
                 "configured_key_count": credential_count,
+                "requested_completion_token_limit": completion_limit,
                 "response_type": type(data).__name__,
             }
         choices = data.get("choices")
@@ -152,17 +154,27 @@ class CloudAIResearcher:
                 )
         usage = data.get("usage")
         if isinstance(usage, dict):
-            usage = {
+            token_usage = {
                 key: value
                 for key, value in usage.items()
                 if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
                 and type(value) is int
             }
+            for detail_name in ("prompt_tokens_details", "completion_tokens_details"):
+                details = usage.get(detail_name)
+                if isinstance(details, dict):
+                    token_usage[detail_name] = {
+                        key: value
+                        for key, value in details.items()
+                        if type(value) is int
+                    }
+            usage = token_usage
         else:
             usage = None
         return {
             "attempt": attempt,
             "configured_key_count": credential_count,
+            "requested_completion_token_limit": completion_limit,
             "response_id": data.get("id") if isinstance(data.get("id"), str) else None,
             "response_model": data.get("model") if isinstance(data.get("model"), str) else None,
             "choice_count": len(choices) if isinstance(choices, list) else None,
@@ -182,10 +194,8 @@ class CloudAIResearcher:
                 {
                     "role": "system",
                     "content": (
-                        "You are a careful news researcher and Indian news editor. Use "
-                        "browser_search to discover and research one current story, then "
-                        "return only the requested single-image Reel plan as JSON. Never invent "
-                        "facts or sources."
+                        "Follow the prompt exactly. Use browser_search; return only the "
+                        "requested single-image Reel JSON. Never invent facts or sources."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -200,9 +210,12 @@ class CloudAIResearcher:
         credential_count = self.credentials.credential_count
         last_http_error: _GroqHTTPError | None = None
         log.info(
-            "[GROQ] Request model=%s; configured keys=%d.",
+            "[GROQ] Request model=%s; configured keys=%d; prompt_chars=%d; "
+            "max_completion_tokens=%d.",
             self.model,
             credential_count,
+            len(prompt),
+            max_tokens,
         )
         for attempt in range(credential_count):
             api_key = self.credentials.next_credential()
@@ -220,7 +233,12 @@ class CloudAIResearcher:
                     )
                 continue
 
-            metadata = self._response_metadata(data, attempt + 1, credential_count)
+            metadata = self._response_metadata(
+                data,
+                attempt + 1,
+                credential_count,
+                max_tokens,
+            )
             log.info("[GROQ] Response metadata: %s", json.dumps(metadata, sort_keys=True))
             if raw_output_path is not None:
                 raw_output_path.parent.mkdir(parents=True, exist_ok=True)

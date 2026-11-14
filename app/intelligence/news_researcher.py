@@ -34,6 +34,7 @@ def build_news_and_post_plan_prompt(
     recent_summaries = previous_summaries or []
     history = "\n".join(f"- {summary}" for summary in recent_summaries) or "- None"
     categories = ", ".join(f'"{category}"' for category in NEWS_CATEGORIES)
+    cooldown_exceptions = ", ".join(f'"{exception}"' for exception in COOLDOWN_EXCEPTIONS)
 
     if posting_cooldown_active:
         publish_rule = (
@@ -46,13 +47,15 @@ def build_news_and_post_plan_prompt(
             "including routine news."
         )
 
-    return f"""Indian news editor. At {current_time}, use browser_search to find 5 latest credible, trending, impactful India-related candidates in {categories}. Report actual candidate/unique counts; never invent them. Strongly prioritize verified events from the last 5 hours; if impact is similar, rank the newer event higher. Use occurrence time, not article time. Select the best by recency, impact, public interest and attention.
+    return f"""At {current_time}, browser_search for 5 latest credible, trending, high-impact India stories in {categories}. Prefer verified events from the last 5 hours; use occurrence time, not article time. Rank by recency, impact and public interest. Report actual candidate/unique counts. Verify facts, distinguish allegations, and never invent facts, counts, URLs or sources.
 
-REPEATS: Compare candidates with all 15 latest posted stories below by event, people, organizations, places and actions—not headline wording alone. One shared distinctive name or keyword flags a repeat: exclude unless sources prove it is a separate event; if unsure, exclude.
+SEARCH: Search across categories; avoid repeat queries/full pages if snippets suffice. Compare supplied history, not old stories. Stop at 5 unique candidates after verifying selected claims and event time; search more only if needed.
+
+DUPES: Compare candidates with all 15 latest posted stories by event, people, organizations, places and actions—not wording. A shared distinctive name/keyword means repeat; exclude unless a source confirms a separate event; if unsure, exclude.
 {history}
 
-PUBLISH: {publish_rule} During the 3-hour cooldown, only a source-backed RARE_EVENT (rare, major event), UNUSUAL_NUMBERS, SAD_EVENT, MAJOR_ACHIEVEMENT, PUBLIC_AWARENESS or MAJOR_CHANGE qualifies; otherwise use NONE. Routine recurring news and tragedy alone do not qualify. Verify claims, distinguish allegations from facts, and do not claim unsupported platform trends.
+PUBLISH: {publish_rule} During the 3-hour cooldown, only source-backed RARE_EVENT, UNUSUAL_NUMBERS, SAD_EVENT, MAJOR_ACHIEVEMENT, PUBLIC_AWARENESS or MAJOR_CHANGE qualifies; otherwise NONE. Recurring news or tragedy alone doesn't qualify.
 
-OUTPUT: Return JSON only. Always include research_metrics {{candidate_count, unique_candidate_count}}, selected_story {{title, event_summary, actual_event_at}} (event_summary: factual, 5-15 words; actual_event_at: source-supported occurrence time in ISO 8601 or null), and publish_assessment {{eligible, reason, cooldown_exception, cooldown_exception_evidence}}. If rejected, omit plan fields and return the best candidate or null. If eligible, also include category, headline, image_body, background_image_prompt, description, hashtags and sources. Never invent facts, counts, URLs or sources.
+OUTPUT: JSON only; no candidate list/prose. Always include top-level research_metrics {{candidate_count: integer, unique_candidate_count: integer}}, selected_story {{title, event_summary, actual_event_at}} and publish_assessment {{eligible: boolean, reason: string, cooldown_exception: one string from [{cooldown_exceptions}], cooldown_exception_evidence: string}}. Event summary: factual, 5-15 words; actual_event_at: source-supported ISO 8601 or null. If rejected, omit plan fields and return best candidate or null. If approved, add category, headline, image_body, background_image_prompt, description, hashtags and sources as top-level siblings of selected_story; never nest them. Keep reason/evidence concise.
 
-PLAN: category is one of the listed types and selects BGM. Make the headline punchy; image_body is self-contained, 25-45 words. Create a bright, vivid, colorful, story-relevant illustration with luminous light, a focal point and negative space; avoid dim, muddy or monochrome colors. Background must contain no text, lettering, signage, logos, watermarks or labels. Layout is flexible; the app adds “The Daily Chronicle”, headline, body and “Like, share and follow”. Description: factual context, max 500 words, include “Like, share and follow” once. Add 5-15 unique, relevant, single-token hashtags and at least one credible source with exact URL and supported facts."""
+PLAN: Category selects BGM. Use a punchy headline and self-contained 25-45-word image_body. Create bright, vivid, colorful, relevant art with luminous light, a focal point and negative space—not dim, muddy or monochrome. Background has no text, lettering, signage, logos, watermarks or labels. App flexibly overlays “The Daily Chronicle”, headline, body and “Like, share and follow”. Factual description, max 500 words, with “Like, share and follow” once. Add 5-15 unique, relevant single-token hashtags and at least one credible source with an exact URL."""
