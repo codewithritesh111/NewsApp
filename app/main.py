@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.intelligence.credential_pool import AIProviderError
-from app.pipeline import run_pipeline
+from app.pipeline import _record_successful_instagram_post, run_pipeline
 from app.social.cloudinary_storage import CloudinaryUploadError
 from app.social.instagram import InstagramPublisher, InstagramPublishingError
 
@@ -37,6 +37,7 @@ def _publish_reel(
 ) -> str:
     media_id = publisher.publish_reel(video_url, description)
     summary["instagram_media_id"] = media_id
+    summary["instagram_published_at"] = _record_successful_instagram_post()
     summary["instagram_publishing"] = "PUBLISHED"
     _save_json(summary_path, summary)
     return media_id

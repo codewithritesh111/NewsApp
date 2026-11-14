@@ -18,6 +18,7 @@ class MainCliTests(unittest.TestCase):
             description = "A factual update. Like, share and follow"
             (post_dir / "caption.txt").write_text(description, encoding="utf-8")
             summary_path = run_dir / "run_summary.json"
+            posting_history_path = Path(temp_dir) / "posting_history.json"
             summary_path.write_text(
                 json.dumps(
                     {
@@ -39,6 +40,7 @@ class MainCliTests(unittest.TestCase):
                 patch("app.main.settings", fake_settings),
                 patch("app.main.run_pipeline", return_value=run_dir) as pipeline,
                 patch("app.main.InstagramPublisher") as publisher_class,
+                patch("app.pipeline.POSTING_HISTORY_PATH", posting_history_path),
             ):
                 publisher_class.return_value.publish_reel.return_value = "12345"
                 main()
@@ -52,6 +54,10 @@ class MainCliTests(unittest.TestCase):
             saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(saved_summary["instagram_publishing"], "PUBLISHED")
             self.assertEqual(saved_summary["instagram_media_id"], "12345")
+            self.assertEqual(
+                json.loads(posting_history_path.read_text(encoding="utf-8"))["last_posted_at"],
+                saved_summary["instagram_published_at"],
+            )
 
     def test_publish_flag_treats_gate_rejection_as_successful_skip(self):
         with tempfile.TemporaryDirectory() as temp_dir:

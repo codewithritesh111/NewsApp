@@ -8,6 +8,11 @@ REEL_WIDTH = 1080
 REEL_HEIGHT = 1920
 BGM_DIRECTORY = Path(__file__).resolve().parents[2] / "BGM"
 SUPPORTED_AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
+CATEGORY_BGM_ALIASES = {
+    "disaster": "major sad event",
+    "emergencyreporting": "major sad event",
+    "trends": "social trends",
+}
 
 
 def _category_key(value: str) -> str:
@@ -27,8 +32,9 @@ def select_bgm_track(category: str, bgm_dir: Path = BGM_DIRECTORY) -> Path:
         key=lambda track: (track.suffix.casefold(), track.name.casefold()),
     )
     matching_key = _category_key(category)
+    alias_key = _category_key(CATEGORY_BGM_ALIASES.get(matching_key, ""))
     for track in tracks:
-        if _category_key(track.stem) == matching_key:
+        if _category_key(track.stem) in {matching_key, alias_key}:
             return track
 
     for track in tracks:

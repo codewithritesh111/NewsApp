@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,12 +17,19 @@ from app.images.reel_encoder import (
 )
 from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
-from app.intelligence.news_researcher import NEWS_CATEGORIES, build_news_and_post_plan_prompt
+from app.intelligence.news_researcher import (
+    COOLDOWN_EXCEPTIONS,
+    NEWS_CATEGORIES,
+    build_news_and_post_plan_prompt,
+)
 from app.social.cloudinary_storage import CloudinaryPublicMedia
 
 log = logging.getLogger(__name__)
 SHORTLISTED_HEADLINES_PATH = Path(__file__).resolve().parents[1] / "shortlisted_headlines.json"
+POSTING_HISTORY_PATH = Path(__file__).resolve().parents[1] / "posting_history.json"
 MAX_SHORTLISTED_HEADLINES = 15
+POSTING_COOLDOWN = timedelta(hours=3)
+CREDENTIAL_ROTATION_PATH = Path(__file__).resolve().parents[1] / "credential_rotation.json"
 INSTAGRAM_CAPTION_LIMIT = 2200
 ENGAGEMENT_CTA = "Like, share and follow"
 HASHTAG_MIN_COUNT = 5
@@ -100,6 +108,30 @@ def _record_shortlisted_summary(path: Path, summary: str, previous_summaries: li
     _write_json(path, (previous_summaries + [summary])[-MAX_SHORTLISTED_HEADLINES:])
 
 
+def _read_last_posted_at(path: Path) -> datetime | None:
+    if not path.exists():
+        return None
+    try:
+        history = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Posting history file is invalid JSON: {path}") from exc
+    if not isinstance(history, dict):
+        raise ValueError(f"Posting history file must contain a JSON object: {path}")
+    last_posted_at = history.get("last_posted_at")
+    if last_posted_at is None:
+        return None
+    parsed = _parse_event_timestamp(last_posted_at)
+    if parsed is None:
+        raise ValueError(f"Posting history last_posted_at must be a timezone-aware ISO 8601 value: {path}")
+    return parsed
+
+
+def _record_successful_instagram_post() -> str:
+    posted_at = datetime.now(IST)
+    _write_json(POSTING_HISTORY_PATH, {"last_posted_at": posted_at.isoformat()})
+    return posted_at.isoformat()
+
+
 def _summary_word_count(summary: str) -> int:
     return len(re.findall(r"[^\W_]+(?:['’\-][^\W_]+)*", summary, flags=re.UNICODE))
 
@@ -136,31 +168,42 @@ def _story_keywords(text: str) -> set[str]:
 
 
 def _find_recent_story_overlap(story: dict, previous_summaries: list[str]) -> str | None:
-    current_keywords = _story_keywords(
-        f"{story.get('title', '')} {story.get('event_summary', '')}"
-    )
-    if len(current_keywords) < 2:
-        return None
+    current_texts = [
+        value.strip()
+        for value in (story.get("title", ""), story.get("event_summary", ""))
+        if isinstance(value, str) and value.strip()
+    ]
     for previous_summary in previous_summaries:
         previous_keywords = _story_keywords(previous_summary)
         if len(previous_keywords) < 2:
             continue
-        shared_keywords = current_keywords & previous_keywords
-        overlap_ratio = len(shared_keywords) / min(len(current_keywords), len(previous_keywords))
-        if len(shared_keywords) >= 2 and overlap_ratio >= 0.5:
-            return previous_summary
+        for current_text in current_texts:
+            current_keywords = _story_keywords(current_text)
+            if len(current_keywords) < 2:
+                continue
+            shared_keywords = current_keywords & previous_keywords
+            overlap_ratio = len(shared_keywords) / min(len(current_keywords), len(previous_keywords))
+            text_similarity = SequenceMatcher(
+                None,
+                " ".join(sorted(current_keywords)),
+                " ".join(sorted(previous_keywords)),
+            ).ratio()
+            if (
+                (len(shared_keywords) >= 2 and overlap_ratio >= 0.25)
+                or text_similarity >= 0.72
+            ):
+                return previous_summary
     return None
 
 
 def _validate_no_recent_story_overlap(
     plan: dict,
     previous_summaries: list[str],
-    allow_significant_new_development: bool = False,
 ) -> None:
     overlap = _find_recent_story_overlap(plan["selected_story"], previous_summaries)
-    if overlap and not allow_significant_new_development:
+    if overlap:
         raise ValueError(
-            "Groq selected a story with substantially overlapping main keywords "
+            "Groq selected a story that overlaps shortlisted news "
             f"from shortlisted history: {overlap!r}."
         )
 
@@ -177,6 +220,26 @@ def _parse_event_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _posting_cooldown_rejection_reason(
+    assessment: dict,
+    last_posted_at: datetime | None,
+    now: datetime | None = None,
+) -> str | None:
+    current_time = now or datetime.now(timezone.utc)
+    if last_posted_at is None or current_time - last_posted_at >= POSTING_COOLDOWN:
+        return None
+
+    if (
+        assessment["cooldown_exception"] in COOLDOWN_EXCEPTIONS[1:]
+        and assessment["cooldown_exception_evidence"].strip()
+    ):
+        return None
+    return (
+        "A Reel was published within the last 3 hours, and this story has no "
+        "evidence-backed exception."
+    )
+
+
 def _validate_research_result(
     result: dict,
     previous_summaries: list[str] | None = None,
@@ -189,9 +252,8 @@ def _validate_research_result(
     if (
         type(candidate_count) is not int
         or type(unique_count) is not int
-        or candidate_count < 0
-        or unique_count < 0
-        or unique_count > candidate_count
+        or not 0 <= candidate_count <= 5
+        or not 0 <= unique_count <= candidate_count
     ):
         raise ValueError("Groq research metrics must contain valid candidate counts.")
 
@@ -200,56 +262,28 @@ def _validate_research_result(
         raise ValueError("Groq research result must include a structured publish_assessment.")
     if type(assessment.get("eligible")) is not bool:
         raise ValueError("Publish assessment eligible must be a boolean.")
-    for field in (
-        "india_wide_relevance",
-        "public_interest",
-        "public_attention",
-        "recency",
-        "significance",
-        "uniqueness",
-        "emotional_resonance",
-    ):
-        rating = assessment.get(field)
-        if not isinstance(rating, str) or rating not in {
-            "LOW",
-            "MODERATE",
-            "HIGH",
-            "VERY_HIGH",
-        }:
-            raise ValueError(f"Publish assessment {field} must use a supported rating.")
-    for field in ("thought_provoking", "significant_new_development"):
-        if type(assessment.get(field)) is not bool:
-            raise ValueError(f"Publish assessment {field} must be a boolean.")
-    if not isinstance(assessment.get("human_stakes"), str):
-        raise ValueError("Publish assessment human_stakes must be a string.")
-    for field in (
-        "reason",
-        "new_development_summary",
-        "human_stakes",
-        "india_wide_impact_evidence",
-        "emotional_resonance_evidence",
-    ):
+    if assessment.get("cooldown_exception") not in COOLDOWN_EXCEPTIONS:
+        raise ValueError("Publish assessment cooldown_exception must use a supported value.")
+    for field in ("reason", "cooldown_exception_evidence"):
         if not isinstance(assessment.get(field), str):
             raise ValueError(f"Publish assessment {field} must be a string.")
+    if (
+        assessment["cooldown_exception"] != "NONE"
+        and not assessment["cooldown_exception_evidence"].strip()
+    ):
+        raise ValueError("A cooldown exception must include supporting evidence.")
 
     story = result.get("selected_story")
     if story is None:
         if assessment["eligible"]:
             raise ValueError("Groq cannot approve publishing when no story was selected.")
-        if unique_count != 0:
-            raise ValueError("Groq must select the highest-ranked current candidate when one exists.")
         return
     if not isinstance(story, dict) or not isinstance(story.get("title"), str) or not story["title"].strip():
         raise ValueError("Groq selected_story must include a non-empty title or be null.")
+    if unique_count == 0:
+        raise ValueError("Groq cannot select a story when no unique candidate was found.")
     if assessment["eligible"]:
-        _validate_generated_plan(
-            result,
-            previous_summaries,
-            allow_significant_new_development=(
-                assessment["significant_new_development"]
-                and bool(assessment["new_development_summary"].strip())
-            ),
-        )
+        _validate_generated_plan(result, previous_summaries)
 
 
 def _publish_gate_rejection_reason(
@@ -257,61 +291,24 @@ def _publish_gate_rejection_reason(
     previous_summaries: list[str],
 ) -> str | None:
     assessment = result["publish_assessment"]
-    reasons = []
     if not assessment["eligible"]:
-        reasons.append(assessment["reason"].strip() or "Groq rejected the story for publishing.")
-    required_ratings = {
-        "india_wide_relevance": {"VERY_HIGH"},
-        "public_interest": {"VERY_HIGH"},
-        "public_attention": {"VERY_HIGH"},
-        "recency": {"VERY_HIGH"},
-        "significance": {"VERY_HIGH"},
-        "uniqueness": {"VERY_HIGH"},
-        "emotional_resonance": {"VERY_HIGH"},
-    }
-    for field, accepted in required_ratings.items():
-        if assessment[field] not in accepted:
-            reasons.append(f"{field.replace('_', ' ').capitalize()} assessment is below the publishing threshold.")
-    if not assessment["thought_provoking"]:
-        reasons.append("The story does not have a substantiated thought-provoking angle.")
-    for field, label in (
-        ("human_stakes", "specific human stakes"),
-        ("india_wide_impact_evidence", "evidence of India-wide impact"),
-        ("emotional_resonance_evidence", "evidence of authentic emotional resonance"),
-    ):
-        if not assessment[field].strip():
-            reasons.append(f"The story lacks {label}.")
-
-    event_time = _parse_event_timestamp(assessment.get("actual_event_at"))
-    now = datetime.now(timezone.utc)
-    if event_time is None:
-        reasons.append("The actual event/development timestamp is missing or not a timezone-aware ISO 8601 value.")
+        reason = assessment["reason"].strip() or "Groq rejected the story for publishing."
     else:
-        event_age = now - event_time
-        if event_age < -timedelta(minutes=5):
-            reasons.append("The reported actual event/development timestamp is in the future.")
-        elif event_age > timedelta(hours=24):
-            reasons.append("The actual event/development is older than 24 hours.")
+        reason = ""
 
     story = result.get("selected_story")
     if story is None:
-        reasons.append("No credible, recent news candidate was selected.")
+        reason = "No credible, non-duplicate news candidate was selected."
     else:
         overlap = _find_recent_story_overlap(story, previous_summaries)
-        if overlap and not (
-            assessment["significant_new_development"]
-            and assessment["new_development_summary"].strip()
-            and event_time is not None
-            and now - event_time <= timedelta(hours=24)
-        ):
-            reasons.append("The story substantially overlaps a recent post without a verified significant new development.")
-    return " ".join(dict.fromkeys(reasons)) or None
+        if overlap:
+            reason = "The story overlaps shortlisted news and must not be selected again."
+    return reason or None
 
 
 def _validate_generated_plan(
     plan: dict,
     previous_summaries: list[str] | None = None,
-    allow_significant_new_development: bool = False,
 ) -> None:
     story = plan.get("selected_story")
     if not isinstance(story, dict):
@@ -360,11 +357,7 @@ def _validate_generated_plan(
     sources = plan.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("Groq Reel plan must include at least one source.")
-    _validate_no_recent_story_overlap(
-        plan,
-        previous_summaries or [],
-        allow_significant_new_development,
-    )
+    _validate_no_recent_story_overlap(plan, previous_summaries or [])
 
 
 def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResearcher:
@@ -374,6 +367,7 @@ def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResea
         api_keys,
         settings.groq_model,
         plan_validator=lambda plan: _validate_research_result(plan, previous_summaries),
+        credential_state_path=CREDENTIAL_ROTATION_PATH,
     )
 
 
@@ -383,27 +377,16 @@ def _generate_background(
     credentials: RotatingCredentialPool[tuple[str, str]],
     model: str,
 ) -> Path:
-    last_error: AIProviderError | None = None
-    credential_count = credentials.credential_count
-    for attempt, (account_id, api_token) in enumerate(credentials.attempts(), start=1):
-        try:
-            return CloudflareImageGenerator(account_id, api_token, model).generate(
-                prompt, output_path
-            )
-        except AIProviderError as exc:
-            last_error = exc
-            if attempt < credential_count:
-                log.warning(
-                    "Cloudflare image request failed with credential %d/%d; "
-                    "trying the next configured credential.",
-                    attempt,
-                    credential_count,
-                )
-
-    raise AIProviderError(
-        "Cloudflare image generation failed with all "
-        f"{credential_count} configured credential(s). Last error: {last_error}"
-    ) from last_error
+    account_id, api_token = credentials.next_credential()
+    try:
+        return CloudflareImageGenerator(account_id, api_token, model).generate(
+            prompt, output_path
+        )
+    except AIProviderError as exc:
+        raise AIProviderError(
+            "Cloudflare image generation failed with the selected round-robin credential: "
+            f"{exc}"
+        ) from exc
 
 
 def _prepare_description(plan: dict) -> str:
@@ -453,9 +436,17 @@ def run_pipeline(
 
     log.info("[NEWS] Fetching current candidates with Groq browser_search.")
     previous_summaries = _read_shortlisted_summaries(SHORTLISTED_HEADLINES_PATH)
+    last_posted_at = _read_last_posted_at(POSTING_HISTORY_PATH)
+    posting_cooldown_active = (
+        last_posted_at is not None
+        and started_at.astimezone(timezone.utc) - last_posted_at < POSTING_COOLDOWN
+    )
     result = _make_ai_client(previous_summaries).research_and_generate_plan(
-        build_news_and_post_plan_prompt(previous_summaries),
-        9000,
+        build_news_and_post_plan_prompt(
+            previous_summaries,
+            posting_cooldown_active=posting_cooldown_active,
+        ),
+        3500,
         run_dir / "groq_response.txt",
     )
     if not isinstance(result, dict):
@@ -475,24 +466,28 @@ def run_pipeline(
     else:
         log.info("[SELECTION] No candidate was eligible for ranking.")
 
-    log.info("[PUBLISH GATE] Public interest: %s", assessment["public_interest"])
-    log.info("[PUBLISH GATE] Recency: %s", assessment["recency"])
-    log.info("[PUBLISH GATE] Public attention: %s", assessment["public_attention"])
-    log.info("[PUBLISH GATE] Significance: %s", assessment["significance"])
-    log.info("[PUBLISH GATE] Uniqueness: %s", assessment["uniqueness"])
-    log.info("[PUBLISH GATE] India-wide relevance: %s", assessment["india_wide_relevance"])
-    log.info("[PUBLISH GATE] Thought-provoking: %s", assessment["thought_provoking"])
-    log.info("[PUBLISH GATE] Emotional resonance: %s", assessment["emotional_resonance"])
-    log.info("[PUBLISH GATE] Human stakes: %s", assessment["human_stakes"])
+    log.info("[PUBLISH GATE] Cooldown exception: %s", assessment["cooldown_exception"])
     rejection_reason = _publish_gate_rejection_reason(result, previous_summaries)
+    cooldown_rejection_reason = _posting_cooldown_rejection_reason(
+        assessment,
+        last_posted_at,
+    )
+    cooldown_blocked = cooldown_rejection_reason is not None and story is not None
+    if cooldown_blocked:
+        rejection_reason = " ".join(
+            reason
+            for reason in (rejection_reason, cooldown_rejection_reason)
+            if reason
+        )
     if rejection_reason:
+        status = "skipped_posting_cooldown" if cooldown_blocked else "skipped_publish_gate"
         log.info("[PUBLISH GATE] Decision: REJECTED")
         log.info("[PUBLISH GATE] Reason: %s", rejection_reason)
         log.info("[PIPELINE] Skipping downstream processing. Execution completed successfully.")
         _write_json(
             run_dir / "run_summary.json",
             {
-                "status": "skipped_publish_gate",
+                "status": status,
                 "run_id": run_id,
                 "execution_started_at_ist": started_at.isoformat(),
                 "ai_provider": "groq",
@@ -512,14 +507,7 @@ def run_pipeline(
     log.info("[PUBLISH GATE] Decision: APPROVED")
     log.info("[PUBLISH GATE] Reason: %s", assessment["reason"])
     plan = result
-    _validate_generated_plan(
-        plan,
-        previous_summaries,
-        allow_significant_new_development=(
-            assessment["significant_new_development"]
-            and bool(assessment["new_development_summary"].strip())
-        ),
-    )
+    _validate_generated_plan(plan, previous_summaries)
 
     cloudinary_settings = None
     if not text_only:
@@ -566,7 +554,11 @@ def run_pipeline(
             "cloudflare_credentials",
             ((settings.cloudflare_account_id, settings.cloudflare_api_token),),
         )
-        credential_pool = RotatingCredentialPool(cloudflare_credentials, "Cloudflare")
+        credential_pool = RotatingCredentialPool(
+            cloudflare_credentials,
+            "Cloudflare",
+            CREDENTIAL_ROTATION_PATH,
+        )
         background_path = background_dir / "background.jpg"
         _generate_background(
             plan["background_image_prompt"].strip(),

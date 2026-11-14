@@ -1,6 +1,5 @@
 """Groq client for hosted browser research and single-image Reel plans."""
 import json
-import logging
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -9,9 +8,6 @@ from typing import Any
 import requests
 
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
-
-log = logging.getLogger(__name__)
-
 
 class CloudAIResearcher:
     URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -22,12 +18,15 @@ class CloudAIResearcher:
         api_key: str | Sequence[str],
         model: str,
         plan_validator: Callable[[dict[str, Any]], None] | None = None,
+        credential_state_path: Path | None = None,
     ):
         if (provider or "").strip().lower() != "groq":
             raise ValueError("This workflow requires Groq browser_search. Set AI_PROVIDER=groq.")
         api_keys = (api_key,) if isinstance(api_key, str) else tuple(api_key)
         self.credentials = RotatingCredentialPool(
-            (key.strip() for key in api_keys if key.strip()), "Groq"
+            (key.strip() for key in api_keys if key.strip()),
+            "Groq",
+            credential_state_path,
         )
         if model not in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}:
             raise ValueError(
@@ -110,46 +109,34 @@ class CloudAIResearcher:
             "tools": [{"type": "browser_search"}],
         }
 
-        last_error: AIProviderError | None = None
         credential_count = self.credentials.credential_count
-        for attempt, api_key in enumerate(self.credentials.attempts(), start=1):
-            try:
-                content = self._content(self._post(payload, api_key))
-                plan = self._extract_json(content)
-                validator = getattr(self, "plan_validator", None)
-                if validator is not None:
-                    try:
-                        validator(plan)
-                    except ValueError as exc:
-                        raise AIProviderError("Groq returned an invalid single-image Reel plan.") from exc
-                break
-            except AIProviderError as exc:
-                last_error = exc
-                if attempt < credential_count:
-                    log.warning(
-                        "Groq request failed with credential %d/%d; trying the next configured credential.",
-                        attempt,
-                        credential_count,
-                    )
-        else:
-            if last_error and "HTTP 429" in str(last_error):
+        api_key = self.credentials.next_credential()
+        try:
+            content = self._content(self._post(payload, api_key))
+            plan = self._extract_json(content)
+            validator = getattr(self, "plan_validator", None)
+            if validator is not None:
+                try:
+                    validator(plan)
+                except ValueError as exc:
+                    raise AIProviderError(
+                        "Groq returned an invalid single-image Reel plan."
+                    ) from exc
+        except AIProviderError as exc:
+            if "HTTP 429" in str(exc):
                 raise AIProviderError(
-                    f"Groq returned HTTP 429 for all {credential_count} configured "
-                    "credential(s), indicating a rate limit or exhausted quota. "
-                    "Check Groq account limits and configure additional active keys "
-                    "with GROQ_API_KEYS. Keys in the same organization may share quota."
-                ) from last_error
-            if last_error and "HTTP 401" in str(last_error):
+                    "Groq returned HTTP 429 using the selected round-robin credential. "
+                    f"Check Groq account limits and configure active keys in GROQ_API_KEYS "
+                    f"({credential_count} configured). Keys in the same organization "
+                    "may share quota."
+                ) from exc
+            if "HTTP 401" in str(exc):
                 raise AIProviderError(
-                    f"Groq returned HTTP 401 for all {credential_count} configured "
-                    "credential(s), which means Groq rejected the API key(s). Create "
-                    "a new active key in Groq, update GROQ_API_KEYS (or GROQ_API_KEY) "
-                    "in .env, and restart the app. Do not reuse a key that was revoked."
-                ) from last_error
-            raise AIProviderError(
-                f"Groq request failed with all {credential_count} configured "
-                f"credential(s). Last error: {last_error}"
-            ) from last_error
+                    "Groq returned HTTP 401 using the selected round-robin credential. "
+                    "Check GROQ_API_KEYS (or GROQ_API_KEY), replace rejected keys, "
+                    "and restart the app."
+                ) from exc
+            raise
 
         if raw_output_path is not None:
             raw_output_path.parent.mkdir(parents=True, exist_ok=True)
