@@ -24,10 +24,14 @@ from app.intelligence.news_researcher import (
     build_news_and_post_plan_prompt,
 )
 from app.pipeline import (
+    ADDITIONAL_REEL_HASHTAGS,
     COOLDOWN_HOURS,
+    _combine_hashtags,
+    _enhance_image_prompt,
     _generate_background,
     _get_event_summary,
     _is_posting_cooldown_active,
+    _prepare_description,
     _publish_gate_rejection_reason,
     _read_last_posted_at,
     _record_successful_instagram_post,
@@ -1164,6 +1168,35 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertIn("MAJOR_ACHIEVEMENT", prompt)
         self.assertIn("small crime", prompt.lower())
         self.assertIn("minor incident", prompt.lower())
+
+    def test_additional_reel_hashtags_are_appended_to_caption(self):
+        plan = {
+            "description": "Important national news development. Like, share and follow",
+            "hashtags": ["#IndiaNews", "#Breaking", "#trending"],  # Notice #trending is already here
+        }
+        caption = _prepare_description(plan)
+        for tag in ("#reels", "#reelsinstagram", "#explorepage", "#trending", "#viral", "#fyp"):
+            self.assertIn(tag, caption)
+
+        # Ensure #trending appears only once (case-insensitive deduplication)
+        self.assertEqual(caption.casefold().count("#trending"), 1)
+
+        combined = _combine_hashtags(["#StoryTag", "#viral"])
+        self.assertIn("#reels", combined)
+        self.assertIn("#fyp", combined)
+        self.assertEqual(len([t for t in combined if t.casefold() == "#viral"]), 1)
+
+    def test_enhance_image_prompt_for_bright_attractive_background(self):
+        base_prompt = "A simple illustration of a government building"
+        enhanced = _enhance_image_prompt(base_prompt)
+        self.assertIn("bright", enhanced.lower())
+        self.assertIn("vibrant", enhanced.lower())
+        self.assertIn("attractive", enhanced.lower())
+        self.assertIn("background", enhanced.lower())
+
+        # If bright is already present, doesn't duplicate
+        already_bright = "A bright vibrant scene with attractive background scenery"
+        self.assertEqual(_enhance_image_prompt(already_bright), already_bright)
 
 
 if __name__ == "__main__":

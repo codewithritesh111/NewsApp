@@ -96,7 +96,7 @@ If the reel is finalized to be posted (eligible is true):
 - category: Classify the news into exactly one of [{allowed_topics}].
 - headline: Specific, punchy headline understandable without context, 5-10 words.
 - image_body: 25-45 words describing what happened, key verified specifics, and why the audience should care.
-- background_image_prompt: Create a plan of the image to be generated for the post. The generated image should be attractive with a proper relevant editorial background. The image plan should NOT have any image type label in the image, and must NOT be a fixed format—it must be flexible for the app to overlay: Name of news channel (The Daily Chronicle), headline, content, and "Like, Share and Follow" wherever suits. Do NOT ask for text, lettering, words, logos, or watermarks in the background image. Do NOT add "See description for more detail" in the plan or image.
+- background_image_prompt: Create a plan of the image to be generated for the post. The generated image MUST be bright, vibrant, and eye-catching with a good, attractive, and colorful background directly relevant to this news story so people's interest will increase. Use bright cinematic lighting, rich colors, and clear visual depth. The image plan should NOT have any image type label in the image, and must NOT be a fixed format—it must be flexible for the app to overlay: Name of news channel (The Daily Chronicle), headline, content, and "Like, Share and Follow" wherever suits. Do NOT ask for text, lettering, words, logos, or watermarks in the background image. Do NOT add "See description for more detail" in the plan or image.
 - description: An engaging explanation of the news (max 500 words) for the Instagram caption. Must include "Like, share and follow" exactly once.
 - hashtags: 5-15 relevant hashtags starting with #.
 - selected_story: factual title, 5-15 word event_summary, url, and source.
@@ -126,7 +126,7 @@ Return ONLY one valid JSON object (no markdown, no backticks, no extra text):
   "category": "BreakingNews",
   "headline": "Punchy Specific News Headline",
   "image_body": "25 to 45 words explaining what happened, confirmed facts, and why the audience should care about this news development.",
-  "background_image_prompt": "An attractive, visually rich editorial illustration relevant to this news story, with clear depth, cinematic lighting, and clean negative space flexible for text overlays. No text or logos.",
+  "background_image_prompt": "A bright, vibrant, and visually striking editorial illustration with an attractive, colorful background relevant to this news story, bright cinematic lighting, high clarity, and clean negative space flexible for text overlays. No text or logos.",
   "description": "Engaging description explaining the story and context. Like, share and follow.",
   "hashtags": ["#News", "#India", "#BreakingNews", "#LatestUpdates", "#CurrentAffairs"],
   "sources": [{{"name": "Publisher", "title": "Article Title", "url": "https://..."}}]

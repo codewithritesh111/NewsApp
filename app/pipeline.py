@@ -476,18 +476,46 @@ def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResea
     )
 
 
+ADDITIONAL_REEL_HASHTAGS = (
+    "#reels",
+    "#reelsinstagram",
+    "#explorepage",
+    "#trending",
+    "#viral",
+    "#fyp",
+)
+
+
+def _combine_hashtags(story_hashtags: list[str]) -> list[str]:
+    combined = list(story_hashtags)
+    seen = {tag.casefold() for tag in story_hashtags}
+    for tag in ADDITIONAL_REEL_HASHTAGS:
+        if tag.casefold() not in seen:
+            combined.append(tag)
+            seen.add(tag.casefold())
+    return combined
+
+
+def _enhance_image_prompt(prompt: str) -> str:
+    cleaned = prompt.strip()
+    if "bright" in cleaned.casefold() and "attractive" in cleaned.casefold():
+        return cleaned
+    return f"{cleaned}, bright vibrant cinematic lighting, attractive and colorful background, rich vivid colors"
+
+
 def _generate_background(
     prompt: str,
     output_path: Path,
     credentials: RotatingCredentialPool[tuple[str, str]],
     model: str,
 ) -> Path:
+    enhanced_prompt = _enhance_image_prompt(prompt)
     last_error: AIProviderError | None = None
     credential_count = credentials.credential_count
     for attempt, (account_id, api_token) in enumerate(credentials.attempts(), start=1):
         try:
             return CloudflareImageGenerator(account_id, api_token, model).generate(
-                prompt, output_path
+                enhanced_prompt, output_path
             )
         except AIProviderError as exc:
             last_error = exc
@@ -509,13 +537,14 @@ def _prepare_description(plan: dict) -> str:
     description = plan["description"].strip()
     if ENGAGEMENT_CTA.casefold() not in description.casefold():
         description = f"{description.rstrip()}\n\n{ENGAGEMENT_CTA}"
-    hashtags = plan.get("hashtags", [])
-    if hashtags:
-        description = f"{description.rstrip()}\n\n{' '.join(hashtags)}"
+    story_hashtags = plan.get("hashtags", [])
+    all_hashtags = _combine_hashtags(story_hashtags)
+    if all_hashtags:
+        description = f"{description.rstrip()}\n\n{' '.join(all_hashtags)}"
     if len(description) > INSTAGRAM_CAPTION_LIMIT:
         raise ValueError(
             f"Instagram description exceeds the {INSTAGRAM_CAPTION_LIMIT}-character limit "
-            "after adding the engagement call to action."
+            "after adding the engagement call to action and hashtags."
         )
     if _summary_word_count(description) > 500:
         raise ValueError("Instagram description exceeds the 500-word limit.")
@@ -657,6 +686,7 @@ def run_pipeline(
     headline = plan["headline"].strip()
     description = _prepare_description(plan)
     plan["description"] = description
+    plan["hashtags"] = _combine_hashtags(plan.get("hashtags", []))
     _write_json(run_dir / "post_plan.json", plan)
     post_dir = run_dir / f"best_news_{_safe_name(headline)}"
     background_dir = post_dir / "backgrounds"
