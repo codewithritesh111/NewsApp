@@ -37,43 +37,73 @@ HASHTAG_MAX_COUNT = 15
 IST = timezone(timedelta(hours=5, minutes=30), name="IST")
 GENERIC_STORY_WORDS = {
     "about",
+    "affected",
     "after",
     "against",
     "amid",
     "announced",
     "announces",
+    "accident",
+    "attack",
     "around",
+    "arrested",
     "before",
     "being",
     "break",
     "breaking",
+    "case",
+    "clash",
     "country",
+    "current",
+    "court",
+    "crash",
     "development",
     "during",
+    "event",
+    "explosion",
+    "fire",
     "first",
     "from",
     "government",
     "india",
     "indian",
     "into",
+    "killed",
+    "launch",
     "latest",
+    "local",
     "major",
+    "minister",
     "more",
     "news",
     "official",
     "officials",
     "over",
+    "people",
+    "police",
+    "public",
+    "project",
     "report",
     "reports",
+    "resident",
+    "residents",
+    "scheme",
     "said",
     "says",
     "story",
+    "service",
+    "services",
+    "significant",
+    "strike",
     "that",
     "their",
     "there",
+    "test",
+    "tests",
     "these",
     "this",
     "today",
+    "trial",
     "update",
     "updates",
     "were",
@@ -175,23 +205,19 @@ def _find_recent_story_overlap(story: dict, previous_summaries: list[str]) -> st
     ]
     for previous_summary in previous_summaries:
         previous_keywords = _story_keywords(previous_summary)
-        if len(previous_keywords) < 2:
+        if not previous_keywords:
             continue
         for current_text in current_texts:
             current_keywords = _story_keywords(current_text)
-            if len(current_keywords) < 2:
+            if not current_keywords:
                 continue
             shared_keywords = current_keywords & previous_keywords
-            overlap_ratio = len(shared_keywords) / min(len(current_keywords), len(previous_keywords))
             text_similarity = SequenceMatcher(
                 None,
                 " ".join(sorted(current_keywords)),
                 " ".join(sorted(previous_keywords)),
             ).ratio()
-            if (
-                (len(shared_keywords) >= 2 and overlap_ratio >= 0.25)
-                or text_similarity >= 0.72
-            ):
+            if shared_keywords or text_similarity >= 0.72:
                 return previous_summary
     return None
 

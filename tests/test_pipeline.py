@@ -49,17 +49,27 @@ class TrendPipelineTests(unittest.TestCase):
     def test_news_prompt_is_compact_and_covers_candidate_and_publish_rules(self):
         prompt = build_news_and_post_plan_prompt()
         cooldown_prompt = build_news_and_post_plan_prompt(posting_cooldown_active=True)
+        history = [f"Published story {index}: Distinct event {index}" for index in range(15)]
+        prompt_with_history = build_news_and_post_plan_prompt(history)
 
         self.assertIn("5 latest", prompt)
-        self.assertIn("latest 15 published stories", prompt)
-        self.assertIn("logically describing the same event", prompt)
+        self.assertIn("last 5 hours", prompt)
+        self.assertIn("occurrence time, not article time", prompt)
+        self.assertIn("all 15 latest posted stories", prompt)
+        self.assertIn("compare candidates with all 15", prompt.lower())
+        self.assertIn("one shared distinctive name", prompt.lower())
         self.assertIn("No Reel was posted within 3 hours", prompt)
         self.assertIn("A Reel was posted within 3 hours", cooldown_prompt)
         self.assertIn("UNUSUAL_NUMBERS", prompt)
-        self.assertIn("never include “see description for more detail”", prompt.lower())
-        self.assertLess(len(prompt), 3500)
+        self.assertNotIn("see description for more detail", prompt.lower())
+        self.assertIn("bright, vivid, colorful", prompt.lower())
+        self.assertIn("no text, lettering, signage", prompt.lower())
+        self.assertLess(len(prompt), 2700)
+        for item in history:
+            self.assertIn(item, prompt_with_history)
         for category in NEWS_CATEGORIES:
             self.assertIn(f'"{category}"', prompt)
+            self.assertEqual(prompt.count(f'"{category}"'), 1)
 
     def test_research_result_rejects_more_than_five_candidates(self):
         result = _approve_test_plan(
@@ -363,9 +373,15 @@ class TrendPipelineTests(unittest.TestCase):
                 ["ISRO test fires GSLV rocket engine ahead of NVS 04 launch"],
             )
 
+        with self.assertRaisesRegex(ValueError, "overlaps shortlisted news"):
+            _validate_generated_plan(
+                plan,
+                ["ISRO announces a new Chandrayaan lunar science instrument"],
+            )
+
         _validate_generated_plan(
             plan,
-            ["ISRO announces a new Chandrayaan lunar science instrument"],
+            ["Rajasthan announces new water conservation rules for farmers"],
         )
 
     def test_plan_validator_rejects_small_overlap_with_a_shortlisted_event(self):
@@ -950,12 +966,12 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertEqual(max_tokens, 3500)
             self.assertIn("browser_search", prompt.lower())
             self.assertIn("5 latest", prompt.lower())
-            self.assertIn("select the single best candidate", prompt.lower())
-            self.assertIn("logically describing the same event", prompt.lower())
+            self.assertIn("select the best by recency", prompt.lower())
+            self.assertIn("compare candidates with all 15", prompt.lower())
             self.assertIn("no reel was posted within 3 hours", prompt.lower())
             self.assertIn("500 words", prompt.lower())
-            self.assertIn("never include “see description for more detail”", prompt.lower())
-            self.assertIn("latest 15 published stories", prompt.lower())
+            self.assertNotIn("see description for more detail", prompt.lower())
+            self.assertIn("all 15 latest posted stories", prompt.lower())
             self.assertIn("5-15 unique", prompt.lower())
             self.assertIn(previous_summaries[0], prompt)
             generated_post_plan = json.loads(
@@ -1058,6 +1074,8 @@ class TrendPipelineTests(unittest.TestCase):
 
             with Image.open(output) as image:
                 self.assertEqual(image.size, (1080, 1920))
+                self.assertGreater(sum(image.getpixel((1000, 200))), sum((70, 90, 110)))
+                self.assertLess(image.getpixel((100, 1580))[0], image.getpixel((100, 1580))[1])
 
 
 if __name__ == "__main__":

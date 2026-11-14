@@ -173,12 +173,14 @@ def compose_news_image(
     height: int = 1920,
 ):
     image = _cover_crop(Image.open(background_path), width, height)
-    image = ImageEnhance.Brightness(image).enhance(0.55)
+    image = ImageEnhance.Color(image).enhance(1.5)
+    image = ImageEnhance.Contrast(image).enhance(1.05)
+    image = ImageEnhance.Brightness(image).enhance(1.2)
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
     for y in range(height):
         progress = y / height
-        alpha = int(25 + 155 * progress**1.7)
+        alpha = int(2 + 28 * progress**1.7)
         overlay_draw.line((0, y, width, y), fill=(4, 10, 22, alpha))
     image = Image.alpha_composite(image.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(image)
@@ -236,7 +238,7 @@ def compose_news_image(
     panel_draw.rounded_rectangle(
         (32, content_top - 28, width - 32, panel_bottom),
         radius=30,
-        fill=(5, 10, 20, 190),
+        fill=(5, 10, 20, 125),
     )
     image = Image.alpha_composite(image, panel)
     draw = ImageDraw.Draw(image)

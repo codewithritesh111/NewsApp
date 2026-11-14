@@ -46,24 +46,13 @@ def build_news_and_post_plan_prompt(
             "including routine news."
         )
 
-    return f"""You are an Indian news editor. At {current_time}, use browser_search to find the 5 latest, credible, trending and impactful India-related news candidates across Crime, Politics, Geopolitics, Disaster, Achievement, BreakingNews, Business, Trends and EmergencyReporting. If fewer than 5 can be verified, report the actual count; never invent news or counts. Select the single best candidate by recency, impact, public interest and attention.
+    return f"""Indian news editor. At {current_time}, use browser_search to find 5 latest credible, trending, impactful India-related candidates in {categories}. Report actual candidate/unique counts; never invent them. Strongly prioritize verified events from the last 5 hours; if impact is similar, rank the newer event higher. Use occurrence time, not article time. Select the best by recency, impact, public interest and attention.
 
-Exclude any candidate logically describing the same event as one of the latest 15 published stories below, even if the wording or angle differs. Compare the underlying people, organizations, place and action, not just headlines. If uncertain, exclude it.
-
-Published stories:
+REPEATS: Compare candidates with all 15 latest posted stories below by event, people, organizations, places and actions—not headline wording alone. One shared distinctive name or keyword flags a repeat: exclude unless sources prove it is a separate event; if unsure, exclude.
 {history}
 
-Publish rule: {publish_rule}
-During the 3-hour cooldown, an exception must be supported by sources and be one of: RARE_EVENT (rare, major event), UNUSUAL_NUMBERS, SAD_EVENT, MAJOR_ACHIEVEMENT, PUBLIC_AWARENESS (audience needs to know), or MAJOR_CHANGE. Routine daily/monthly/yearly events do not qualify. Use NONE without a clear exception. Never exaggerate, sensationalize, or treat tragedy alone as an automatic exception. Use credible sources, distinguish confirmed facts from allegations, and do not claim a story is trending on a platform without evidence.
+PUBLISH: {publish_rule} During the 3-hour cooldown, only a source-backed RARE_EVENT (rare, major event), UNUSUAL_NUMBERS, SAD_EVENT, MAJOR_ACHIEVEMENT, PUBLIC_AWARENESS or MAJOR_CHANGE qualifies; otherwise use NONE. Routine recurring news and tragedy alone do not qualify. Verify claims, distinguish allegations from facts, and do not claim unsupported platform trends.
 
-If eligible, return one compact JSON object with: research_metrics {{candidate_count, unique_candidate_count}}; selected_story {{title, event_summary}} where event_summary is a factual 5-15-word summary; publish_assessment {{eligible, reason, cooldown_exception, cooldown_exception_evidence}}; category; headline; image_body; background_image_prompt; description; hashtags; sources. If no candidate is eligible, return research_metrics, selected_story (object or null), and publish_assessment only. Report candidate counts accurately.
+OUTPUT: Return JSON only. Always include research_metrics {{candidate_count, unique_candidate_count}}, selected_story {{title, event_summary, actual_event_at}} (event_summary: factual, 5-15 words; actual_event_at: source-supported occurrence time in ISO 8601 or null), and publish_assessment {{eligible, reason, cooldown_exception, cooldown_exception_evidence}}. If rejected, omit plan fields and return the best candidate or null. If eligible, also include category, headline, image_body, background_image_prompt, description, hashtags and sources. Never invent facts, counts, URLs or sources.
 
-For an eligible plan:
-- category must be exactly one of {categories}; use it as the news type for BGM selection.
-- headline should be punchy and clear. image_body should explain what happened and why it matters in 25-45 words.
-- background_image_prompt: create an attractive, relevant editorial illustration with a clear focal subject and useful negative space. Do not render text, logos, watermarks, image-type labels (such as “Instagram post” or “Reel”), or the channel name. Adapt the composition to this story; do not force a fixed layout. The app overlays the channel name “The Daily Chronicle”, headline, image body and “Like, share and follow” where they fit. Never include “See description for more detail”.
-- description: factual, engaging context, at most 500 words; include “Like, share and follow” exactly once.
-- hashtags: 5-15 unique, relevant single-token hashtags beginning with #.
-- sources: at least one credible source with its name, exact URL and the facts it supports.
-
-Return JSON only, with no markdown. Use this compact assessment shape: {{"eligible":true,"reason":"...","cooldown_exception":"NONE","cooldown_exception_evidence":""}}. Set eligible=false when there is no credible, current, non-duplicate candidate or the active cooldown is not met. Never invent sources, URLs, facts or timestamps."""
+PLAN: category is one of the listed types and selects BGM. Make the headline punchy; image_body is self-contained, 25-45 words. Create a bright, vivid, colorful, story-relevant illustration with luminous light, a focal point and negative space; avoid dim, muddy or monochrome colors. Background must contain no text, lettering, signage, logos, watermarks or labels. Layout is flexible; the app adds “The Daily Chronicle”, headline, body and “Like, share and follow”. Description: factual context, max 500 words, include “Like, share and follow” once. Add 5-15 unique, relevant, single-token hashtags and at least one credible source with exact URL and supported facts."""
