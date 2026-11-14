@@ -64,6 +64,35 @@ class CloudAIResearcher:
             raise AIProviderError("Groq JSON response must be an object.")
         return value
 
+    @staticmethod
+    def _normalize_plan_shape(plan: dict[str, Any]) -> dict[str, Any]:
+        story = plan.get("selected_story")
+        if not isinstance(story, dict):
+            return plan
+
+        plan_fields = (
+            "category",
+            "headline",
+            "image_body",
+            "background_image_prompt",
+            "description",
+            "hashtags",
+            "sources",
+        )
+        moved_fields = []
+        for field in plan_fields:
+            if field in story:
+                if field not in plan:
+                    plan[field] = story[field]
+                    moved_fields.append(field)
+                del story[field]
+        if moved_fields:
+            log.warning(
+                "[GROQ] Promoted plan fields nested under selected_story to the top level: %s.",
+                ", ".join(moved_fields),
+            )
+        return plan
+
     def _post(self, payload: dict, api_key: str | None = None) -> dict:
         key = api_key if api_key is not None else getattr(self, "api_key", "")
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -259,7 +288,7 @@ class CloudAIResearcher:
                 raise
             if raw_output_path is not None:
                 raw_output_path.write_text(content, encoding="utf-8")
-            plan = self._extract_json(content)
+            plan = self._normalize_plan_shape(self._extract_json(content))
             validator = getattr(self, "plan_validator", None)
             if validator is not None:
                 try:

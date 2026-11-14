@@ -255,6 +255,35 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertEqual(result, plan)
             self.assertEqual(json.loads(raw_output.read_text(encoding="utf-8")), plan)
 
+    def test_groq_client_moves_nested_reel_plan_fields_to_top_level(self):
+        plan = {
+            "selected_story": {
+                "title": "A current India story",
+                "category": "Other",
+                "headline": "The update",
+                "image_body": "A concise image story.",
+                "background_image_prompt": "A bright editorial illustration.",
+                "description": "A factual update.",
+                "hashtags": ["#IndiaNews"],
+                "sources": [{"url": "https://news.example/story"}],
+            },
+        }
+        client = CloudAIResearcher(
+            "groq",
+            ["test-key"],
+            "openai/gpt-oss-20b",
+            plan_validator=_validate_generated_plan_structure,
+        )
+        response = {"choices": [{"message": {"content": json.dumps(plan)}}]}
+
+        with patch.object(client, "_post", return_value=response):
+            result = client.research_and_generate_plan("Return a plan")
+
+        self.assertEqual(result["category"], "Other")
+        self.assertEqual(result["headline"], "The update")
+        self.assertEqual(result["sources"], [{"url": "https://news.example/story"}])
+        self.assertEqual(result["selected_story"], {"title": "A current India story"})
+
     def test_groq_plan_does_not_retry_invalid_response_with_another_key(self):
         client = CloudAIResearcher("groq", ["first-key", "second-key"], "openai/gpt-oss-20b")
         response = {"choices": [{"message": {"content": "not valid JSON"}}]}
