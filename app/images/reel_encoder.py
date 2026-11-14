@@ -10,6 +10,15 @@ BGM_DIRECTORY = Path(__file__).resolve().parents[2] / "BGM"
 SUPPORTED_AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 
 
+CATEGORY_BGM_ALIASES = {
+    "disaster": "Major Sad Event",
+    "emergencyreporting": "Major Sad Event",
+    "trends": "Social trends",
+    "achievement": "Other",
+    "breakingnews": "Other",
+}
+
+
 def _category_key(value: str) -> str:
     return value.casefold().replace(" ", "")
 
@@ -30,6 +39,13 @@ def select_bgm_track(category: str, bgm_dir: Path = BGM_DIRECTORY) -> Path:
     for track in tracks:
         if _category_key(track.stem) == matching_key:
             return track
+
+    aliased = CATEGORY_BGM_ALIASES.get(matching_key)
+    if aliased:
+        aliased_key = _category_key(aliased)
+        for track in tracks:
+            if _category_key(track.stem) == aliased_key:
+                return track
 
     for track in tracks:
         if _category_key(track.stem) == "other":

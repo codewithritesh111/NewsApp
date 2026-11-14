@@ -1,66 +1,126 @@
 from datetime import datetime, timedelta, timezone
 
-
 NEWS_CATEGORIES = (
+    "Crime",
     "Politics",
     "Geopolitics",
-    "Crime",
-    "Technology",
+    "Disaster",
+    "Achievement",
+    "BreakingNews",
     "Business",
-    "Defence",
+    "Trends",
+    "EmergencyReporting",
     "Other",
+    # Legacy categories kept for backwards compatibility
     "Government schemes",
     "Social trends",
     "Major Sad Event",
     "Major Good Event",
+    "Technology",
+    "Defence",
+)
+
+COOLDOWN_EXCEPTIONS = (
+    "NONE",
+    "RARE_EVENT",
+    "UNUSUAL_NUMBERS",
+    "SAD_EVENT",
+    "MAJOR_ACHIEVEMENT",
+    "PUBLIC_AWARENESS",
+    "MAJOR_CHANGE",
 )
 
 
 def build_news_and_post_plan_prompt(
     previous_summaries: list[str] | None = None,
+    posting_cooldown_active: bool = False,
 ) -> str:
     india_timezone = timezone(timedelta(hours=5, minutes=30), name="IST")
     current_time = datetime.now(india_timezone).strftime("%A, %d %B %Y %H:%M IST")
-    recent_summaries = previous_summaries or []
+    recent_summaries = (previous_summaries or [])[-15:]
     if recent_summaries:
         recent_summaries_text = "\n".join(f"- {summary}" for summary in recent_summaries)
     else:
         recent_summaries_text = "- None yet."
-    categories = ", ".join(f'"{category}"' for category in NEWS_CATEGORIES)
 
-    return f"""The current date and time in India is {current_time}. Use browser search (`browser_search`) on every execution to collect the latest credible, high-impact news candidates available for an Indian audience. Remove duplicate reports of the same event and outdated stories before ranking. Compare several candidates, then create a single-image Reel plan only if the best story passes the strict publishing gate below. Audience interest is the highest priority. Avoid trivial stories, stale developments, manufactured trends and clickbait.
+    allowed_topics = (
+        '"Crime", "Politics", "Geopolitics", "Disaster", "Achievement", '
+        '"BreakingNews", "Business", "Trends", "EmergencyReporting", "Other"'
+    )
 
-Search across India and international developments relevant to India: politics, geopolitics and diplomacy, crime and public safety, disasters and other major events, science and technology, business and consumer-impact news, government policy and schemes, social trends, sports, entertainment, notable achievements and uplifting human stories. These areas are examples rather than a checklist. Do not force a category.
+    if posting_cooldown_active:
+        cooldown_instructions = """POSTING COOLDOWN STATUS: ACTIVE (a post/reel was published within the last 3 hours).
+Publishing Rules:
+- Rule 2: Check if the news is a regular routine event (events that occur every day, month, or year, such as regular stock index moves, routine political rallies, regular press releases). If it is a regular routine event, DO NOT publish.
+- ONLY publish during cooldown if the news is NOT a regular event, but satisfies at least one exceptional condition:
+    * RARE_EVENT: A greater event that occurs once in a while.
+    * UNUSUAL_NUMBERS: Really has big or unusual numbers.
+    * SAD_EVENT: Very sad or unfortunate event / tragedy.
+    * MAJOR_ACHIEVEMENT: Big historical or national achievement.
+    * PUBLIC_AWARENESS: Something the general audience is urgently required to be aware of.
+    * MAJOR_CHANGE: Big changes took place (sweeping policy, landmark ruling, major reform).
+- If the candidate meets one of these exceptions, set eligible to true and set cooldown_exception to the matching code.
+- Rule 3: Otherwise, skip and terminate the process. Set eligible to false, cooldown_exception to "NONE", and explain the rejection reason."""
+    else:
+        cooldown_instructions = """POSTING COOLDOWN STATUS: INACTIVE (no post/reel through this pipeline was published in the last 3 hours).
+Publishing Rules:
+- Rule 1: If no post/reel through this pipeline is published in last 3 hrs, approve and publish the post/reel (set eligible to true and cooldown_exception to "NONE").
+- If no credible candidate exists or all candidates are duplicates, set eligible to false and explain why."""
 
-Use a two-stage selection process and do not choose an overall winner before completing the category shortlist:
-1. Category shortlist: evaluate each supported category ({categories}) independently. Within each category, compare eligible candidates and identify its single strongest candidate as that category's finalist. If no credible, fresh, non-duplicate candidate qualifies in a category, leave that category without a finalist. Assess candidates by public interest (how many people care or are affected), public attention/engagement potential, recency of the actual development, significance, and uniqueness.
-2. Final selection: compare all category finalists and identify the highest-ranked available story. This ranking does NOT mean it qualifies for publication. Assess the highest-ranked story independently against the strict publishing gate below. Never lower the threshold to maintain posting frequency.
+    return f"""The current date and time in India is {current_time}.
 
-A story may be approved only when it has demonstrable, exceptionally broad India-wide relevance—not merely local/regional interest or a generic claim that everyone is affected. Look for credible evidence the issue affects or could materially affect people across India, multiple regions, or a very large share of the population. It must also have exceptionally high public interest, very strong potential for widespread public attention, a genuinely recent actual event/development (preferably breaking, no older than 24 hours), substantial real-world consequences, and meaningful uniqueness versus recent posts. It should make a broad audience pause and think, with a clear and authentic human/emotional stake (such as concern, hope, awe, empathy, or relief) that is supported by facts. Do not manufacture emotion, sensationalize suffering, or treat tragedy alone as an automatic reason to publish. A repeat underlying event qualifies only for a verified significant new development. Evaluate when the development actually occurred, not merely the article publication time. National decisions affecting millions, consequential constitutional judgments, major geopolitical/economic events, breakthroughs with broad consequences, and national emergencies are examples, not automatic approvals. Routine corporate news, ordinary product launches, minor statements, celebrity updates, routine sports results, old coverage, and interesting-but-low-impact stories should generally fail. A story may rank first and still be rejected. Prefer no post to a mediocre one.
+Follow this exact process to research and shortlist news for The Daily Chronicle Instagram channel:
 
-Check primary or official sources where appropriate and corroborate consequential claims with credible reporting. Treat allegations, estimates, confirmed facts and unknowns distinctly. Never invent facts, quotations, publishers, article titles or URLs. Do not sensationalize crime, tragedy or suffering.
+1. COLLECT CANDIDATES (TOKEN-EFFICIENT SEARCH):
+- Execute ONLY 1 or 2 focused browser search queries (e.g. `browser_search('latest breaking trending news India')`).
+- Inspect the top search result snippets directly. Do NOT make repetitive multi-category searches and do NOT fetch full web pages.
+- Collect exactly 5 latest, trending, impactful, attention-drawing Indian news stories from topics like Crime, Politics, Geopolitics, Disaster, Achievement, BreakingNews, Business, Trends, EmergencyReporting. These 5 stories are your candidates.
 
-Before selecting, strictly exclude every candidate that repeats or substantially overlaps the same underlying news event as any of the latest 15 published-story summaries below, unless it has a verifiable, significant new development within the last 24 hours. Compare distinctive people, organizations, places, programs, event names and actions even when the headline wording differs. Do not evade this check with a secondary angle.
-
-Recent published stories to exclude:
+2. DEDUPLICATION & SHORTLISTING:
+- Critical requirement: strictly ensure the selected candidate is NOT logically similar to any of the last 15 news posted below. Posting duplicate or logically similar stories is strictly prohibited. Compare distinctive people, organizations, places, event names, and actions even if worded differently.
+Last 15 news posted:
 {recent_summaries_text}
 
-Report your research counts based on candidates actually inspected: total collected and unique, current candidates after deduplication and freshness screening. Then report the highest-ranked story and a structured publish assessment. Use rating values LOW, MODERATE, HIGH, VERY_HIGH. Include eligible (boolean), india_wide_relevance, public_interest, public_attention, recency, significance, uniqueness, thought_provoking (boolean), emotional_resonance, human_stakes, india_wide_impact_evidence, emotional_resonance_evidence, actual_event_at (timezone-aware ISO 8601 timestamp for the actual latest development, or null if unknown), significant_new_development (boolean), new_development_summary, and reason. The two evidence fields must identify specific verifiable facts and source support; do not use generic assertions. Only approve when india_wide_relevance, public_interest, public_attention, recency, significance, uniqueness, and emotional_resonance are all VERY_HIGH; thought_provoking is true; human_stakes and both evidence fields are specific and evidence-supported; and actual_event_at is verified and within 24 hours. Do not approve a merely popular, emotional, or highest-ranked story without this broad significance. If no story qualifies or the highest-ranked story fails, set eligible false and explain why. Do not generate post copy, caption, hashtags, or image plan for rejected stories.
+- From the eligible candidates that pass deduplication, select the single best candidate (the Shortlisted Candidate).
 
-Do not claim a story is trending on a platform without evidence. Return exactly one selected story, not alternate final stories.
+3. PUBLISH GATE DECISION:
+{cooldown_instructions}
 
-Only when the publish assessment is eligible true, return the full image plan:
-- category: exactly one of {categories}. Use the spelling "Business".
-- headline: specific, punchy and understandable without context, ideally 5-10 words.
-- image_body: 25-45 words that make the image self-contained: say what happened, one or two key verified specifics, and why the audience should care. Keep it scannable and avoid clutter.
-- background_image_prompt: a compelling editorial illustration supporting this exact news story, with one large recognizable focal subject, visual depth, and clear negative space behind the planned copy. Do not ask the image model to render text, letters, numbers, logos or watermarks. The illustration must not look like documentary evidence.
-- description: a useful, engaging explanation of the news and its context, no more than 500 words. Clearly identify what is confirmed, uncertain or alleged as relevant. It will be used as the Instagram Reel caption. Include "Like, share and follow" exactly once. Do not include an unsupported claim.
-- hashtags: 5-15 unique, relevant hashtags, each a single token beginning with #. Choose specific discoverability tags for this story and its Indian audience, not generic filler. The app appends them to the caption and validates the combined caption against Instagram's 2200-character limit.
-- selected_story.event_summary: a factual, self-explanatory summary of the specific event in 5-15 words, for duplicate detection.
-- sources: exact URLs, publishers, titles, publication dates and what each source supports.
-Keep audience engagement high by making the visual and copy immediately clear, useful, emotionally appropriate and curiosity-provoking without clickbait, misleading omissions or excessive text. The image must contain the supplied headline and image_body as readable overlays, plus this exact callout: "See description for more detail". Include "Like, share and follow" on the image too. Do not put source URLs or the full long description on the image.
+4. OUTPUT FORMAT:
+If the reel is finalized to be posted (eligible is true):
+- category: Classify the news into exactly one of [{allowed_topics}].
+- headline: Specific, punchy headline understandable without context, 5-10 words.
+- image_body: 25-45 words describing what happened, key verified specifics, and why the audience should care.
+- background_image_prompt: Create a plan of the image to be generated for the post. The generated image should be attractive with a proper relevant editorial background. The image plan should NOT have any image type label in the image, and must NOT be a fixed format—it must be flexible for the app to overlay: Name of news channel (The Daily Chronicle), headline, content, and "Like, Share and Follow" wherever suits. Do NOT ask for text, lettering, words, logos, or watermarks in the background image. Do NOT add "See description for more detail" in the plan or image.
+- description: An engaging explanation of the news (max 500 words) for the Instagram caption. Must include "Like, share and follow" exactly once.
+- hashtags: 5-15 relevant hashtags starting with #.
+- selected_story: factual title, 5-15 word event_summary, url, and source.
+- sources: list of source articles.
 
-Return only one valid JSON object, no markdown or extra text. Always include research_metrics and publish_assessment. For an eligible story use this shape:
-{{"research_metrics":{{"candidate_count":25,"unique_candidate_count":18}},"selected_story":{{"title":"...","event_summary":"5-15 word factual summary","published_at":"...","actual_event_at":"ISO 8601 timestamp with timezone","url":"https://...","source":"..."}}, "publish_assessment":{{"eligible":true,"india_wide_relevance":"VERY_HIGH","public_interest":"VERY_HIGH","public_attention":"VERY_HIGH","recency":"VERY_HIGH","significance":"VERY_HIGH","uniqueness":"VERY_HIGH","thought_provoking":true,"emotional_resonance":"VERY_HIGH","human_stakes":"Specific fact-based human consequences.","india_wide_impact_evidence":"Specific verified national or cross-regional impact.","emotional_resonance_evidence":"Specific fact-based reason the development resonates emotionally.","actual_event_at":"ISO 8601 timestamp with timezone","significant_new_development":false,"new_development_summary":"","reason":"..."}}, "category":"one exact allowed category","headline":"...","image_body":"...","background_image_prompt":"...","description":"...","hashtags":["#ExampleOne","#ExampleTwo","#ExampleThree","#ExampleFour","#ExampleFive"],"sources":[{{"name":"publisher","title":"article title","url":"https://...","published_at":"date","supports":"..."}}],"editorial_notes":[]}}
+If eligible is false:
+- Return research_metrics, selected_story (the best candidate or null), and publish_assessment with eligible: false and reason. Do not generate headline, image_body, background_image_prompt, description, or hashtags.
 
-For a rejected or unavailable story, return only the research metrics, selected_story (the highest-ranked story object or null), and publish_assessment with eligible false and reason. Do not include post-plan fields. Never invent candidate counts, timestamps, sources, or facts."""
+Return ONLY one valid JSON object (no markdown, no backticks, no extra text):
+{{
+  "research_metrics": {{"candidate_count": 5, "unique_candidate_count": 5}},
+  "selected_story": {{
+    "title": "Title of shortlisted candidate",
+    "event_summary": "5-15 word factual summary of the event",
+    "published_at": "...",
+    "url": "https://...",
+    "source": "Publisher Name"
+  }},
+  "publish_assessment": {{
+    "eligible": true,
+    "cooldown_active": {str(posting_cooldown_active).lower()},
+    "cooldown_exception": "NONE",
+    "reason": "Clear explanation of the publishing decision"
+  }},
+  "category": "BreakingNews",
+  "headline": "Punchy Specific News Headline",
+  "image_body": "25 to 45 words explaining what happened, confirmed facts, and why the audience should care about this news development.",
+  "background_image_prompt": "An attractive, visually rich editorial illustration relevant to this news story, with clear depth, cinematic lighting, and clean negative space flexible for text overlays. No text or logos.",
+  "description": "Engaging description explaining the story and context. Like, share and follow.",
+  "hashtags": ["#News", "#India", "#BreakingNews", "#LatestUpdates", "#CurrentAffairs"],
+  "sources": [{{"name": "Publisher", "title": "Article Title", "url": "https://..."}}]
+}}"""

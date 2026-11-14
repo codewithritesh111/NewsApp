@@ -34,11 +34,13 @@ class MainCliTests(unittest.TestCase):
                 instagram_graph_api_version="v27.0",
                 cloudinary_settings=("cloud", "key", "secret"),
             )
+            history_path = Path(temp_dir) / "posting_history.json"
             with (
                 patch("sys.argv", ["app.main", "--publish-instagram"]),
                 patch("app.main.settings", fake_settings),
                 patch("app.main.run_pipeline", return_value=run_dir) as pipeline,
                 patch("app.main.InstagramPublisher") as publisher_class,
+                patch("app.main.POSTING_HISTORY_PATH", history_path),
             ):
                 publisher_class.return_value.publish_reel.return_value = "12345"
                 main()

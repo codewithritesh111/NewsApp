@@ -54,16 +54,15 @@ jobs:
       - name: Research news and publish only eligible Reels
         run: python -m app.main --publish-instagram
 
-      - name: Persist duplicate-detection history
+      - name: Persist posting, rotation, and duplicate-detection history
         if: always()
         run: |
-          if git diff --quiet -- shortlisted_headlines.json; then
-            echo "No shortlist updates to persist."
-            exit 0
-          fi
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add shortlisted_headlines.json
-          git commit -m "Update scheduled story history"
+          git add shortlisted_headlines.json posting_history.json credential_rotation.json
+          if git diff --staged --quiet; then
+            echo "No state updates to persist."
+            exit 0
+          fi
+          git commit -m "Update story history, posting timestamp, and credential rotation state"
           git push

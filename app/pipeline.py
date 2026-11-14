@@ -16,11 +16,18 @@ from app.images.reel_encoder import (
 )
 from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
-from app.intelligence.news_researcher import NEWS_CATEGORIES, build_news_and_post_plan_prompt
+from app.intelligence.news_researcher import (
+    COOLDOWN_EXCEPTIONS,
+    NEWS_CATEGORIES,
+    build_news_and_post_plan_prompt,
+)
 from app.social.cloudinary_storage import CloudinaryPublicMedia
 
 log = logging.getLogger(__name__)
 SHORTLISTED_HEADLINES_PATH = Path(__file__).resolve().parents[1] / "shortlisted_headlines.json"
+POSTING_HISTORY_PATH = Path(__file__).resolve().parents[1] / "posting_history.json"
+CREDENTIAL_ROTATION_PATH = Path(__file__).resolve().parents[1] / "credential_rotation.json"
+COOLDOWN_HOURS = 3.0
 MAX_SHORTLISTED_HEADLINES = 15
 INSTAGRAM_CAPTION_LIMIT = 2200
 ENGAGEMENT_CTA = "Like, share and follow"
@@ -177,6 +184,40 @@ def _parse_event_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _read_last_posted_at(path: Path = POSTING_HISTORY_PATH) -> datetime | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    timestamp_str = data.get("last_posted_at")
+    return _parse_event_timestamp(timestamp_str)
+
+
+def _record_successful_instagram_post(
+    path: Path = POSTING_HISTORY_PATH,
+    posted_at: datetime | None = None,
+) -> None:
+    timestamp = (posted_at or datetime.now(timezone.utc)).isoformat()
+    _write_json(path, {"last_posted_at": timestamp})
+
+
+def _is_posting_cooldown_active(
+    path: Path = POSTING_HISTORY_PATH,
+    cooldown_hours: float = COOLDOWN_HOURS,
+    now: datetime | None = None,
+) -> bool:
+    last_posted_at = _read_last_posted_at(path)
+    if last_posted_at is None:
+        return False
+    current_time = now or datetime.now(timezone.utc)
+    elapsed = current_time - last_posted_at
+    return timedelta(0) <= elapsed < timedelta(hours=cooldown_hours)
+
+
 def _validate_research_result(
     result: dict,
     previous_summaries: list[str] | None = None,
@@ -200,6 +241,7 @@ def _validate_research_result(
         raise ValueError("Groq research result must include a structured publish_assessment.")
     if type(assessment.get("eligible")) is not bool:
         raise ValueError("Publish assessment eligible must be a boolean.")
+
     for field in (
         "india_wide_relevance",
         "public_interest",
@@ -209,19 +251,25 @@ def _validate_research_result(
         "uniqueness",
         "emotional_resonance",
     ):
-        rating = assessment.get(field)
-        if not isinstance(rating, str) or rating not in {
-            "LOW",
-            "MODERATE",
-            "HIGH",
-            "VERY_HIGH",
-        }:
-            raise ValueError(f"Publish assessment {field} must use a supported rating.")
-    for field in ("thought_provoking", "significant_new_development"):
-        if type(assessment.get(field)) is not bool:
+        if field in assessment:
+            rating = assessment.get(field)
+            if not isinstance(rating, str) or rating not in {
+                "LOW",
+                "MODERATE",
+                "HIGH",
+                "VERY_HIGH",
+            }:
+                raise ValueError(f"Publish assessment {field} must use a supported rating.")
+
+    for field in ("thought_provoking", "significant_new_development", "cooldown_active"):
+        if field in assessment and type(assessment.get(field)) is not bool:
             raise ValueError(f"Publish assessment {field} must be a boolean.")
-    if not isinstance(assessment.get("human_stakes"), str):
-        raise ValueError("Publish assessment human_stakes must be a string.")
+
+    if "cooldown_exception" in assessment:
+        exception = assessment["cooldown_exception"]
+        if not isinstance(exception, str) or exception not in COOLDOWN_EXCEPTIONS:
+            raise ValueError("Publish assessment cooldown_exception must use a supported code.")
+
     for field in (
         "reason",
         "new_development_summary",
@@ -229,7 +277,7 @@ def _validate_research_result(
         "india_wide_impact_evidence",
         "emotional_resonance_evidence",
     ):
-        if not isinstance(assessment.get(field), str):
+        if field in assessment and not isinstance(assessment.get(field), str):
             raise ValueError(f"Publish assessment {field} must be a string.")
 
     story = result.get("selected_story")
@@ -246,8 +294,8 @@ def _validate_research_result(
             result,
             previous_summaries,
             allow_significant_new_development=(
-                assessment["significant_new_development"]
-                and bool(assessment["new_development_summary"].strip())
+                assessment.get("significant_new_development", False)
+                and bool(assessment.get("new_development_summary", "").strip())
             ),
         )
 
@@ -255,43 +303,59 @@ def _validate_research_result(
 def _publish_gate_rejection_reason(
     result: dict,
     previous_summaries: list[str],
+    posting_cooldown_active: bool = False,
 ) -> str | None:
-    assessment = result["publish_assessment"]
+    assessment = result.get("publish_assessment", {})
     reasons = []
-    if not assessment["eligible"]:
-        reasons.append(assessment["reason"].strip() or "Groq rejected the story for publishing.")
+    if not assessment.get("eligible", False):
+        reasons.append(assessment.get("reason", "").strip() or "Groq rejected the story for publishing.")
+
+    # Rule 2: If cooldown is active, candidate must satisfy one of the non-routine exceptions
+    if posting_cooldown_active:
+        cooldown_exception = assessment.get("cooldown_exception", "NONE")
+        if cooldown_exception not in COOLDOWN_EXCEPTIONS or cooldown_exception == "NONE":
+            reasons.append(
+                "Posting cooldown active (last post was published within 3 hours) and "
+                "the candidate is a routine event without a qualifying cooldown exception."
+            )
+
+    # Legacy rating check: if ratings are present, check if below VERY_HIGH (for backward compatibility)
     required_ratings = {
-        "india_wide_relevance": {"VERY_HIGH"},
-        "public_interest": {"VERY_HIGH"},
-        "public_attention": {"VERY_HIGH"},
-        "recency": {"VERY_HIGH"},
-        "significance": {"VERY_HIGH"},
-        "uniqueness": {"VERY_HIGH"},
-        "emotional_resonance": {"VERY_HIGH"},
+        "india_wide_relevance",
+        "public_interest",
+        "public_attention",
+        "recency",
+        "significance",
+        "uniqueness",
+        "emotional_resonance",
     }
-    for field, accepted in required_ratings.items():
-        if assessment[field] not in accepted:
+    for field in required_ratings:
+        if field in assessment and assessment[field] not in {"VERY_HIGH"}:
             reasons.append(f"{field.replace('_', ' ').capitalize()} assessment is below the publishing threshold.")
-    if not assessment["thought_provoking"]:
+
+    if assessment.get("thought_provoking") is False:
         reasons.append("The story does not have a substantiated thought-provoking angle.")
+
     for field, label in (
         ("human_stakes", "specific human stakes"),
         ("india_wide_impact_evidence", "evidence of India-wide impact"),
         ("emotional_resonance_evidence", "evidence of authentic emotional resonance"),
     ):
-        if not assessment[field].strip():
+        if field in assessment and not assessment[field].strip():
             reasons.append(f"The story lacks {label}.")
 
-    event_time = _parse_event_timestamp(assessment.get("actual_event_at"))
-    now = datetime.now(timezone.utc)
-    if event_time is None:
-        reasons.append("The actual event/development timestamp is missing or not a timezone-aware ISO 8601 value.")
-    else:
-        event_age = now - event_time
-        if event_age < -timedelta(minutes=5):
-            reasons.append("The reported actual event/development timestamp is in the future.")
-        elif event_age > timedelta(hours=24):
-            reasons.append("The actual event/development is older than 24 hours.")
+    event_time_str = assessment.get("actual_event_at")
+    if event_time_str is not None:
+        event_time = _parse_event_timestamp(event_time_str)
+        now = datetime.now(timezone.utc)
+        if event_time is None:
+            reasons.append("The actual event/development timestamp is missing or not a timezone-aware ISO 8601 value.")
+        else:
+            event_age = now - event_time
+            if event_age < -timedelta(minutes=5):
+                reasons.append("The reported actual event/development timestamp is in the future.")
+            elif event_age > timedelta(hours=24):
+                reasons.append("The actual event/development is older than 24 hours.")
 
     story = result.get("selected_story")
     if story is None:
@@ -299,12 +363,18 @@ def _publish_gate_rejection_reason(
     else:
         overlap = _find_recent_story_overlap(story, previous_summaries)
         if overlap and not (
-            assessment["significant_new_development"]
-            and assessment["new_development_summary"].strip()
-            and event_time is not None
-            and now - event_time <= timedelta(hours=24)
+            assessment.get("significant_new_development", False)
+            and bool(assessment.get("new_development_summary", "").strip())
+            and (
+                _parse_event_timestamp(assessment.get("actual_event_at")) is None
+                or (
+                    _parse_event_timestamp(assessment.get("actual_event_at")) is not None
+                    and datetime.now(timezone.utc) - _parse_event_timestamp(assessment.get("actual_event_at")) <= timedelta(hours=24)
+                )
+            )
         ):
             reasons.append("The story substantially overlaps a recent post without a verified significant new development.")
+
     return " ".join(dict.fromkeys(reasons)) or None
 
 
@@ -374,6 +444,7 @@ def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResea
         api_keys,
         settings.groq_model,
         plan_validator=lambda plan: _validate_research_result(plan, previous_summaries),
+        credential_state_path=CREDENTIAL_ROTATION_PATH,
     )
 
 
@@ -453,8 +524,13 @@ def run_pipeline(
 
     log.info("[NEWS] Fetching current candidates with Groq browser_search.")
     previous_summaries = _read_shortlisted_summaries(SHORTLISTED_HEADLINES_PATH)
+    cooldown_active = _is_posting_cooldown_active(POSTING_HISTORY_PATH)
+    log.info("[PUBLISH GATE] 3-hour posting cooldown active: %s", cooldown_active)
     result = _make_ai_client(previous_summaries).research_and_generate_plan(
-        build_news_and_post_plan_prompt(previous_summaries),
+        build_news_and_post_plan_prompt(
+            previous_summaries,
+            posting_cooldown_active=cooldown_active,
+        ),
         9000,
         run_dir / "groq_response.txt",
     )
@@ -475,16 +551,23 @@ def run_pipeline(
     else:
         log.info("[SELECTION] No candidate was eligible for ranking.")
 
-    log.info("[PUBLISH GATE] Public interest: %s", assessment["public_interest"])
-    log.info("[PUBLISH GATE] Recency: %s", assessment["recency"])
-    log.info("[PUBLISH GATE] Public attention: %s", assessment["public_attention"])
-    log.info("[PUBLISH GATE] Significance: %s", assessment["significance"])
-    log.info("[PUBLISH GATE] Uniqueness: %s", assessment["uniqueness"])
-    log.info("[PUBLISH GATE] India-wide relevance: %s", assessment["india_wide_relevance"])
-    log.info("[PUBLISH GATE] Thought-provoking: %s", assessment["thought_provoking"])
-    log.info("[PUBLISH GATE] Emotional resonance: %s", assessment["emotional_resonance"])
-    log.info("[PUBLISH GATE] Human stakes: %s", assessment["human_stakes"])
-    rejection_reason = _publish_gate_rejection_reason(result, previous_summaries)
+    for field in (
+        "public_interest",
+        "recency",
+        "public_attention",
+        "significance",
+        "uniqueness",
+        "india_wide_relevance",
+        "cooldown_exception",
+    ):
+        if field in assessment:
+            log.info("[PUBLISH GATE] %s: %s", field.replace("_", " ").capitalize(), assessment[field])
+
+    rejection_reason = _publish_gate_rejection_reason(
+        result,
+        previous_summaries,
+        posting_cooldown_active=cooldown_active,
+    )
     if rejection_reason:
         log.info("[PUBLISH GATE] Decision: REJECTED")
         log.info("[PUBLISH GATE] Reason: %s", rejection_reason)
@@ -498,6 +581,7 @@ def run_pipeline(
                 "ai_provider": "groq",
                 "ai_model": settings.groq_model,
                 "selection_method": "groq_browser_search",
+                "cooldown_active": cooldown_active,
                 "research_metrics": metrics,
                 "selected_story": story["title"] if story else None,
                 "publish_assessment": assessment,
@@ -510,14 +594,14 @@ def run_pipeline(
         return run_dir
 
     log.info("[PUBLISH GATE] Decision: APPROVED")
-    log.info("[PUBLISH GATE] Reason: %s", assessment["reason"])
+    log.info("[PUBLISH GATE] Reason: %s", assessment.get("reason", "Approved"))
     plan = result
     _validate_generated_plan(
         plan,
         previous_summaries,
         allow_significant_new_development=(
-            assessment["significant_new_development"]
-            and bool(assessment["new_development_summary"].strip())
+            assessment.get("significant_new_development", False)
+            and bool(assessment.get("new_development_summary", "").strip())
         ),
     )
 
@@ -566,7 +650,11 @@ def run_pipeline(
             "cloudflare_credentials",
             ((settings.cloudflare_account_id, settings.cloudflare_api_token),),
         )
-        credential_pool = RotatingCredentialPool(cloudflare_credentials, "Cloudflare")
+        credential_pool = RotatingCredentialPool(
+            cloudflare_credentials,
+            "Cloudflare",
+            CREDENTIAL_ROTATION_PATH,
+        )
         background_path = background_dir / "background.jpg"
         _generate_background(
             plan["background_image_prompt"].strip(),

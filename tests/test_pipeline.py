@@ -5,7 +5,7 @@ import struct
 import tempfile
 import unittest
 import wave
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,15 +14,23 @@ from PIL import Image, ImageChops
 
 from app.config import Settings
 from app.images.image_composer import compose_news_image, compose_slide
-from app.images.reel_encoder import create_static_reel, select_bgm_track
+from app.images.reel_encoder import CATEGORY_BGM_ALIASES, create_static_reel, select_bgm_track
 from app.images.image_composer import _normalise_display_text
 from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
-from app.intelligence.news_researcher import NEWS_CATEGORIES, build_news_and_post_plan_prompt
+from app.intelligence.news_researcher import (
+    COOLDOWN_EXCEPTIONS,
+    NEWS_CATEGORIES,
+    build_news_and_post_plan_prompt,
+)
 from app.pipeline import (
+    COOLDOWN_HOURS,
     _generate_background,
     _get_event_summary,
+    _is_posting_cooldown_active,
     _publish_gate_rejection_reason,
+    _read_last_posted_at,
+    _record_successful_instagram_post,
     _validate_generated_plan,
     run_pipeline,
 )
@@ -57,19 +65,49 @@ def _approve_test_plan(plan: dict) -> dict:
 
 
 class TrendPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self._temp_history = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        self._temp_history.write(b'{"last_posted_at": null}\n')
+        self._temp_history.close()
+        self._temp_rotation = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        self._temp_rotation.write(b'{"groq": 0, "cloudflare": 0}\n')
+        self._temp_rotation.close()
+        self._history_patch = patch("app.pipeline.POSTING_HISTORY_PATH", Path(self._temp_history.name))
+        self._rotation_patch = patch("app.pipeline.CREDENTIAL_ROTATION_PATH", Path(self._temp_rotation.name))
+        self._history_patch.start()
+        self._rotation_patch.start()
+
+    def tearDown(self):
+        self._history_patch.stop()
+        self._rotation_patch.stop()
+        for path in (self._temp_history.name, self._temp_rotation.name):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
     def test_news_prompt_requires_category_shortlist_then_global_comparison(self):
         prompt = build_news_and_post_plan_prompt()
 
-        self.assertIn("evaluate each supported category", prompt)
-        self.assertIn("single strongest candidate as that category's finalist", prompt)
-        self.assertIn("compare all category finalists", prompt)
-        self.assertIn("highest-ranked available story", prompt)
-        self.assertIn("this ranking does not mean it qualifies for publication", prompt.lower())
-        self.assertIn("are all very_high", prompt.lower())
-        self.assertIn("india_wide_relevance", prompt.lower())
-        self.assertIn("emotional_resonance", prompt.lower())
-        for category in NEWS_CATEGORIES:
-            self.assertIn(f'"{category}"', prompt)
+        self.assertIn("5 latest, trending, impactful, attention-drawing indian news", prompt.lower())
+        self.assertIn("shortlisted candidate", prompt.lower())
+        self.assertIn("last 15 news posted", prompt.lower())
+        self.assertIn("last 3 hrs", prompt.lower())
+        self.assertIn("the daily chronicle", prompt.lower())
+        self.assertIn("like, share and follow", prompt.lower())
+        self.assertIn("see description for more detail", prompt.lower())
+        for category in (
+            "Crime",
+            "Politics",
+            "Geopolitics",
+            "Disaster",
+            "Achievement",
+            "BreakingNews",
+            "Business",
+            "Trends",
+            "EmergencyReporting",
+        ):
+            self.assertIn(category, prompt)
 
     def test_multiple_credentials_are_parsed_and_cloudflare_pairs_stay_aligned(self):
         with patch.dict(
@@ -859,20 +897,16 @@ class TrendPipelineTests(unittest.TestCase):
             prompt, max_tokens = requests_seen[0]
             self.assertEqual(max_tokens, 9000)
             self.assertIn("browser search", prompt.lower())
-            self.assertIn("return exactly one selected story", prompt.lower())
-            self.assertIn("do not force a category", prompt.lower())
-            self.assertIn("compare several candidates", prompt.lower())
-            self.assertIn("same underlying news event", prompt.lower())
+            self.assertIn("5 latest, trending, impactful, attention-drawing indian news", prompt.lower())
+            self.assertIn("shortlisted candidate", prompt.lower())
             self.assertIn("5-15 word", prompt.lower())
-            self.assertIn("latest credible, high-impact", prompt.lower())
-            self.assertIn("geopolitics and diplomacy", prompt.lower())
             self.assertIn("500 words", prompt.lower())
+            self.assertIn("like, share and follow", prompt.lower())
+            self.assertIn("the daily chronicle", prompt.lower())
             self.assertIn("see description for more detail", prompt.lower())
-            self.assertIn("latest 15 published-story summaries", prompt.lower())
+            self.assertIn("last 15 news posted", prompt.lower())
             self.assertIn("compare distinctive people, organizations", prompt.lower())
-            self.assertIn("within the last 24 hours", prompt.lower())
-            self.assertIn("audience interest is the highest priority", prompt.lower())
-            self.assertIn("5-15 unique, relevant hashtags", prompt.lower())
+            self.assertIn("5-15 relevant hashtags", prompt.lower())
             self.assertIn(previous_summaries[0], prompt)
             generated_post_plan = json.loads(
                 (Path(summary["post_directory"]) / "post_plan.json").read_text(encoding="utf-8")
@@ -970,6 +1004,141 @@ class TrendPipelineTests(unittest.TestCase):
 
             with Image.open(output) as image:
                 self.assertEqual(image.size, (1080, 1920))
+
+    def test_persistent_round_robin_rotation_groq(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "credential_rotation.json"
+            tokens = ["token-1", "token-2", "token-3", "token-4"]
+
+            # Run 1: selects token-1
+            pool_run1 = RotatingCredentialPool(tokens, "Groq", state_file)
+            self.assertEqual(pool_run1.next_credential(), "token-1")
+            self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["groq"], 1)
+
+            # Run 2: starts with token-2; simulated failure occurs so fallback to token-3
+            pool_run2 = RotatingCredentialPool(tokens, "Groq", state_file)
+            self.assertEqual(pool_run2.next_credential(), "token-2")
+            self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["groq"], 2)
+            self.assertEqual(pool_run2.next_credential(), "token-3")
+            self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["groq"], 3)
+
+            # Run 3: starts with token-4; wraps to 0
+            pool_run3 = RotatingCredentialPool(tokens, "Groq", state_file)
+            self.assertEqual(pool_run3.next_credential(), "token-4")
+            self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["groq"], 0)
+
+            # Run 4: wraps back to token-1
+            pool_run4 = RotatingCredentialPool(tokens, "Groq", state_file)
+            self.assertEqual(pool_run4.next_credential(), "token-1")
+            self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["groq"], 1)
+
+    def test_persistent_round_robin_rotation_cloudflare(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "credential_rotation.json"
+            credentials = [("acc-1", "tok-1"), ("acc-2", "tok-2")]
+
+            pool1 = RotatingCredentialPool(credentials, "Cloudflare", state_file)
+            self.assertEqual(pool1.next_credential(), ("acc-1", "tok-1"))
+
+            pool2 = RotatingCredentialPool(credentials, "Cloudflare", state_file)
+            self.assertEqual(pool2.next_credential(), ("acc-2", "tok-2"))
+
+            pool3 = RotatingCredentialPool(credentials, "Cloudflare", state_file)
+            self.assertEqual(pool3.next_credential(), ("acc-1", "tok-1"))
+
+    def test_posting_cooldown_detection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_file = Path(temp_dir) / "posting_history.json"
+
+            # No previous post
+            history_file.write_text('{"last_posted_at": null}', encoding="utf-8")
+            self.assertFalse(_is_posting_cooldown_active(history_file))
+
+            # Posted 1 hour ago (within 3h cooldown)
+            now = datetime.now(timezone.utc)
+            one_hour_ago = now - timedelta(hours=1)
+            history_file.write_text(json.dumps({"last_posted_at": one_hour_ago.isoformat()}), encoding="utf-8")
+            self.assertTrue(_is_posting_cooldown_active(history_file, now=now))
+
+            # Posted 4 hours ago (outside 3h cooldown)
+            four_hours_ago = now - timedelta(hours=4)
+            history_file.write_text(json.dumps({"last_posted_at": four_hours_ago.isoformat()}), encoding="utf-8")
+            self.assertFalse(_is_posting_cooldown_active(history_file, now=now))
+
+            # Recording new post
+            _record_successful_instagram_post(history_file, posted_at=now)
+            self.assertTrue(_is_posting_cooldown_active(history_file, now=now))
+
+    def test_publish_gate_rules_cooldown_and_exceptions(self):
+        base_result = {
+            "research_metrics": {"candidate_count": 5, "unique_candidate_count": 5},
+            "selected_story": {
+                "title": "Major National Disaster Hits Coastal Region",
+                "event_summary": "Major national disaster hits coastal region causing significant flooding and relief operations",
+            },
+            "publish_assessment": {
+                "eligible": True,
+                "cooldown_active": False,
+                "cooldown_exception": "NONE",
+                "reason": "Top impactful story of the day.",
+            },
+            "category": "Disaster",
+            "headline": "Major Coastal Disaster Hits Region",
+            "image_body": "Severe flooding and relief operations are underway across the affected coastal region today with emergency teams deployed to assist local residents and businesses immediately.",
+            "background_image_prompt": "Editorial illustration of emergency relief operations.",
+            "description": "Critical updates on the coastal disaster relief. Like, share and follow.",
+            "hashtags": ["#Disaster", "#IndiaNews", "#Breaking", "#Relief", "#Updates"],
+            "sources": [{"url": "https://example.com/disaster"}],
+        }
+
+        # Rule 1: Cooldown inactive -> Approved
+        self.assertIsNone(_publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False))
+
+        # Rule 2: Cooldown active and routine event (cooldown_exception = NONE) -> Rejected
+        base_result["publish_assessment"]["cooldown_exception"] = "NONE"
+        rejection = _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True)
+        self.assertIsNotNone(rejection)
+        self.assertIn("Posting cooldown active", rejection)
+
+        # Rule 2: Cooldown active with valid exception -> Approved
+        for exception in ("RARE_EVENT", "UNUSUAL_NUMBERS", "SAD_EVENT", "MAJOR_ACHIEVEMENT", "PUBLIC_AWARENESS", "MAJOR_CHANGE"):
+            base_result["publish_assessment"]["cooldown_exception"] = exception
+            self.assertIsNone(
+                _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True),
+                f"Failed to approve valid exception: {exception}",
+            )
+
+        # Rule 3: Eligible false -> Rejected with reason
+        base_result["publish_assessment"]["eligible"] = False
+        base_result["publish_assessment"]["reason"] = "Routine event during cooldown."
+        self.assertIn("Routine event during cooldown", _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True))
+
+    def test_bgm_track_aliasing_and_mapping(self):
+        # Direct matches
+        self.assertEqual(select_bgm_track("Crime").name, "Crime.mp3")
+        self.assertEqual(select_bgm_track("Politics").name, "Politics.mp3")
+        self.assertEqual(select_bgm_track("Business").name, "Business.mp3")
+        self.assertEqual(select_bgm_track("Geopolitics").name, "Geopolitics.mp3")
+
+        # Aliases
+        self.assertEqual(select_bgm_track("Disaster").name, "Major Sad Event.mp3")
+        self.assertEqual(select_bgm_track("EmergencyReporting").name, "Major Sad Event.mp3")
+        self.assertEqual(select_bgm_track("Trends").name, "Social trends.mp3")
+
+        # Fallback to Other
+        self.assertEqual(select_bgm_track("Other").name, "Other.m4a")
+        self.assertEqual(select_bgm_track("BreakingNews").name, "Other.m4a")
+        self.assertEqual(select_bgm_track("Achievement").name, "Other.m4a")
+
+    def test_news_prompt_with_cooldown_active_enforces_exception_rules(self):
+        prompt = build_news_and_post_plan_prompt(posting_cooldown_active=True)
+        self.assertIn("POSTING COOLDOWN STATUS: ACTIVE", prompt)
+        self.assertIn("RARE_EVENT", prompt)
+        self.assertIn("UNUSUAL_NUMBERS", prompt)
+        self.assertIn("SAD_EVENT", prompt)
+        self.assertIn("MAJOR_ACHIEVEMENT", prompt)
+        self.assertIn("PUBLIC_AWARENESS", prompt)
+        self.assertIn("MAJOR_CHANGE", prompt)
 
 
 if __name__ == "__main__":
