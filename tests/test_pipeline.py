@@ -1101,12 +1101,37 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertIn("Posting cooldown active", rejection)
 
         # Rule 2: Cooldown active with valid exception -> Approved
-        for exception in ("RARE_EVENT", "UNUSUAL_NUMBERS", "SAD_EVENT", "MAJOR_ACHIEVEMENT", "PUBLIC_AWARENESS", "MAJOR_CHANGE"):
+        for exception in (
+            "BREAKING_NEWS",
+            "NATIONWIDE_IMPACT",
+            "DISASTER",
+            "MAJOR_ACHIEVEMENT",
+            "RARE_EVENT",
+            "UNUSUAL_NUMBERS",
+            "SAD_EVENT",
+            "PUBLIC_AWARENESS",
+            "MAJOR_CHANGE",
+        ):
             base_result["publish_assessment"]["cooldown_exception"] = exception
             self.assertIsNone(
                 _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True),
                 f"Failed to approve valid exception: {exception}",
             )
+
+        # Rule 2: Cooldown active - minor/small incidents strictly rejected
+        base_result["publish_assessment"]["cooldown_exception"] = "BREAKING_NEWS"
+        base_result["publish_assessment"]["is_minor_or_local_incident"] = True
+        minor_rejection = _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True)
+        self.assertIsNotNone(minor_rejection)
+        self.assertIn("small crime, small event, or minor incident", minor_rejection)
+        base_result["publish_assessment"]["is_minor_or_local_incident"] = False
+
+        # Rule 2: Cooldown active - lacks nationwide impact strictly rejected
+        base_result["publish_assessment"]["nationwide_impact"] = False
+        impact_rejection = _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True)
+        self.assertIsNotNone(impact_rejection)
+        self.assertIn("lacks verified nationwide impact", impact_rejection)
+        base_result["publish_assessment"]["nationwide_impact"] = True
 
         # Rule 3: Eligible false -> Rejected with reason
         base_result["publish_assessment"]["eligible"] = False
@@ -1133,12 +1158,12 @@ class TrendPipelineTests(unittest.TestCase):
     def test_news_prompt_with_cooldown_active_enforces_exception_rules(self):
         prompt = build_news_and_post_plan_prompt(posting_cooldown_active=True)
         self.assertIn("POSTING COOLDOWN STATUS: ACTIVE", prompt)
-        self.assertIn("RARE_EVENT", prompt)
-        self.assertIn("UNUSUAL_NUMBERS", prompt)
-        self.assertIn("SAD_EVENT", prompt)
+        self.assertIn("BREAKING_NEWS", prompt)
+        self.assertIn("NATIONWIDE_IMPACT", prompt)
+        self.assertIn("DISASTER", prompt)
         self.assertIn("MAJOR_ACHIEVEMENT", prompt)
-        self.assertIn("PUBLIC_AWARENESS", prompt)
-        self.assertIn("MAJOR_CHANGE", prompt)
+        self.assertIn("small crime", prompt.lower())
+        self.assertIn("minor incident", prompt.lower())
 
 
 if __name__ == "__main__":

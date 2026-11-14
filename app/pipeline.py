@@ -261,7 +261,13 @@ def _validate_research_result(
             }:
                 raise ValueError(f"Publish assessment {field} must use a supported rating.")
 
-    for field in ("thought_provoking", "significant_new_development", "cooldown_active"):
+    for field in (
+        "thought_provoking",
+        "significant_new_development",
+        "cooldown_active",
+        "nationwide_impact",
+        "is_minor_or_local_incident",
+    ):
         if field in assessment and type(assessment.get(field)) is not bool:
             raise ValueError(f"Publish assessment {field} must be a boolean.")
 
@@ -311,12 +317,34 @@ def _publish_gate_rejection_reason(
         reasons.append(assessment.get("reason", "").strip() or "Groq rejected the story for publishing.")
 
     # Rule 2: If cooldown is active, candidate must satisfy one of the non-routine exceptions
+    # and strictly exclude small crime, small event, or minor incident
     if posting_cooldown_active:
+        if assessment.get("is_minor_or_local_incident") is True:
+            reasons.append(
+                "Posting cooldown active (last post was published within 3 hours): "
+                "small crime, small event, or minor incident is strictly excluded during cooldown."
+            )
+        if assessment.get("nationwide_impact") is False:
+            reasons.append(
+                "Posting cooldown active: story lacks verified nationwide impact or national importance."
+            )
         cooldown_exception = assessment.get("cooldown_exception", "NONE")
         if cooldown_exception not in COOLDOWN_EXCEPTIONS or cooldown_exception == "NONE":
             reasons.append(
                 "Posting cooldown active (last post was published within 3 hours) and "
                 "the candidate is a routine event without a qualifying cooldown exception."
+            )
+        category = result.get("category")
+        if category == "Crime" and cooldown_exception not in {
+            "BREAKING_NEWS",
+            "NATIONWIDE_IMPACT",
+            "DISASTER",
+            "MAJOR_CHANGE",
+            "UNUSUAL_NUMBERS",
+            "SAD_EVENT",
+        }:
+            reasons.append(
+                "Posting cooldown active: small or isolated crime incidents are excluded during cooldown."
             )
 
     # Legacy rating check: if ratings are present, check if below VERY_HIGH (for backward compatibility)

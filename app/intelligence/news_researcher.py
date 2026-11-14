@@ -22,10 +22,13 @@ NEWS_CATEGORIES = (
 
 COOLDOWN_EXCEPTIONS = (
     "NONE",
+    "BREAKING_NEWS",
+    "NATIONWIDE_IMPACT",
+    "DISASTER",
+    "MAJOR_ACHIEVEMENT",
     "RARE_EVENT",
     "UNUSUAL_NUMBERS",
     "SAD_EVENT",
-    "MAJOR_ACHIEVEMENT",
     "PUBLIC_AWARENESS",
     "MAJOR_CHANGE",
 )
@@ -49,22 +52,24 @@ def build_news_and_post_plan_prompt(
     )
 
     if posting_cooldown_active:
-        cooldown_instructions = """POSTING COOLDOWN STATUS: ACTIVE (a post/reel was published within the last 3 hours).
-Publishing Rules:
-- Rule 2: Check if the news is a regular routine event (events that occur every day, month, or year, such as regular stock index moves, routine political rallies, regular press releases). If it is a regular routine event, DO NOT publish.
-- ONLY publish during cooldown if the news is NOT a regular event, but satisfies at least one exceptional condition:
-    * RARE_EVENT: A greater event that occurs once in a while.
-    * UNUSUAL_NUMBERS: Really has big or unusual numbers.
-    * SAD_EVENT: Very sad or unfortunate event / tragedy.
-    * MAJOR_ACHIEVEMENT: Big historical or national achievement.
-    * PUBLIC_AWARENESS: Something the general audience is urgently required to be aware of.
-    * MAJOR_CHANGE: Big changes took place (sweeping policy, landmark ruling, major reform).
-- If the candidate meets one of these exceptions, set eligible to true and set cooldown_exception to the matching code.
-- Rule 3: Otherwise, skip and terminate the process. Set eligible to false, cooldown_exception to "NONE", and explain the rejection reason."""
+        cooldown_instructions = """POSTING COOLDOWN STATUS: ACTIVE (at least one post/reel was published within the last 3 hours).
+CRITICAL COOLDOWN PUBLISHING RULES:
+Since a post/reel was published in the last 3 hours, the pipeline is in cooldown.
+- ABSOLUTE EXCLUSIONS: Do NOT publish any small crime (e.g. local theft, isolated robbery, minor fraud, local arrest), small local event, minor incident, or routine/regular event (daily/monthly/yearly occurrences). All small crimes and minor incidents MUST BE REJECTED during cooldown.
+- STRICT COOLDOWN EXCEPTION: Publish ONLY if the candidate is genuinely very important, such as a major BreakingNews event, has verified nationwide impact across India, is a major Disaster, or a major historical Achievement:
+    * BREAKING_NEWS: Very important breaking news event of urgent national concern.
+    * NATIONWIDE_IMPACT: Verified nationwide impact affecting people or policy across India.
+    * DISASTER: Major natural or human disaster, major tragedy, or national emergency.
+    * MAJOR_ACHIEVEMENT: Big historical or national achievement / major breakthrough.
+    * RARE_EVENT: A greater event that occurs once in a long while.
+    * UNUSUAL_NUMBERS: Involves big, unusual, or shocking numbers.
+    * MAJOR_CHANGE: Big systemic changes took place (landmark law, major constitutional ruling).
+- If the candidate meets these strict criteria, set eligible to true, nationwide_impact to true, is_minor_or_local_incident to false, and set cooldown_exception to the matching code.
+- Rule 3: If the candidate is a small crime, small event, minor incident, or lacks nationwide importance, set eligible to false, is_minor_or_local_incident to true, cooldown_exception to "NONE", and explain the rejection reason."""
     else:
         cooldown_instructions = """POSTING COOLDOWN STATUS: INACTIVE (no post/reel through this pipeline was published in the last 3 hours).
 Publishing Rules:
-- Rule 1: If no post/reel through this pipeline is published in last 3 hrs, approve and publish the post/reel (set eligible to true and cooldown_exception to "NONE").
+- Rule 1: If no post/reel through this pipeline is published in last 3 hrs, approve and publish the post/reel (set eligible to true, cooldown_exception to "NONE", and is_minor_or_local_incident to false).
 - If no credible candidate exists or all candidates are duplicates, set eligible to false and explain why."""
 
     return f"""The current date and time in India is {current_time}.
@@ -114,6 +119,8 @@ Return ONLY one valid JSON object (no markdown, no backticks, no extra text):
     "eligible": true,
     "cooldown_active": {str(posting_cooldown_active).lower()},
     "cooldown_exception": "NONE",
+    "nationwide_impact": true,
+    "is_minor_or_local_incident": false,
     "reason": "Clear explanation of the publishing decision"
   }},
   "category": "BreakingNews",
