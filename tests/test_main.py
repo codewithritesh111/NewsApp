@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.main import main
+from app.main import _append_instagram_hashtags, main
 
 
 class MainCliTests(unittest.TestCase):
@@ -48,7 +48,10 @@ class MainCliTests(unittest.TestCase):
             pipeline.assert_called_once_with(require_publish_configuration=True)
             publisher_class.return_value.publish_reel.assert_called_once_with(
                 "https://res.cloudinary.com/demo/reel.mp4",
-                description,
+                (
+                    f"{description}\n\n"
+                    "#reels #reelsinstagram #explorepage #trending #viral"
+                ),
             )
             publisher_class.return_value.create_comment.assert_not_called()
             saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -58,6 +61,17 @@ class MainCliTests(unittest.TestCase):
                 json.loads(posting_history_path.read_text(encoding="utf-8"))["last_posted_at"],
                 saved_summary["instagram_published_at"],
             )
+
+    def test_publish_hashtags_are_added_once_case_insensitively(self):
+        caption = "News update #Reels #explorepage"
+
+        updated_caption = _append_instagram_hashtags(caption)
+
+        self.assertEqual(
+            updated_caption,
+            "News update #Reels #explorepage\n\n"
+            "#reelsinstagram #trending #viral",
+        )
 
     def test_publish_flag_treats_gate_rejection_as_successful_skip(self):
         with tempfile.TemporaryDirectory() as temp_dir:

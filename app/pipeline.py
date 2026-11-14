@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import re
-from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,7 +18,6 @@ from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
 from app.intelligence.news_researcher import (
     COOLDOWN_EXCEPTIONS,
-    NEWS_CATEGORIES,
     build_news_and_post_plan_prompt,
 )
 from app.social.cloudinary_storage import CloudinaryPublicMedia
@@ -30,86 +28,7 @@ POSTING_HISTORY_PATH = Path(__file__).resolve().parents[1] / "posting_history.js
 MAX_SHORTLISTED_HEADLINES = 15
 POSTING_COOLDOWN = timedelta(hours=3)
 CREDENTIAL_ROTATION_PATH = Path(__file__).resolve().parents[1] / "credential_rotation.json"
-INSTAGRAM_CAPTION_LIMIT = 2200
-ENGAGEMENT_CTA = "Like, share and follow"
-HASHTAG_MIN_COUNT = 5
-HASHTAG_MAX_COUNT = 15
 IST = timezone(timedelta(hours=5, minutes=30), name="IST")
-GENERIC_STORY_WORDS = {
-    "about",
-    "affected",
-    "after",
-    "against",
-    "amid",
-    "announced",
-    "announces",
-    "accident",
-    "attack",
-    "around",
-    "arrested",
-    "before",
-    "being",
-    "break",
-    "breaking",
-    "case",
-    "clash",
-    "country",
-    "current",
-    "court",
-    "crash",
-    "development",
-    "during",
-    "event",
-    "explosion",
-    "fire",
-    "first",
-    "from",
-    "government",
-    "india",
-    "indian",
-    "into",
-    "killed",
-    "launch",
-    "latest",
-    "local",
-    "major",
-    "minister",
-    "more",
-    "news",
-    "official",
-    "officials",
-    "over",
-    "people",
-    "police",
-    "public",
-    "project",
-    "report",
-    "reports",
-    "resident",
-    "residents",
-    "scheme",
-    "said",
-    "says",
-    "story",
-    "service",
-    "services",
-    "significant",
-    "strike",
-    "that",
-    "their",
-    "there",
-    "test",
-    "tests",
-    "these",
-    "this",
-    "today",
-    "trial",
-    "update",
-    "updates",
-    "were",
-    "which",
-    "with",
-}
 
 
 def _safe_name(value: str) -> str:
@@ -162,76 +81,20 @@ def _record_successful_instagram_post() -> str:
     return posted_at.isoformat()
 
 
-def _summary_word_count(summary: str) -> int:
-    return len(re.findall(r"[^\W_]+(?:['’\-][^\W_]+)*", summary, flags=re.UNICODE))
-
-
 def _get_event_summary(story: dict) -> str:
     summary = story.get("event_summary")
-    if isinstance(summary, str) and 5 <= _summary_word_count(summary) <= 15:
+    if isinstance(summary, str) and summary.strip():
         return summary.strip()
 
     for field in ("title", "trend_rationale"):
         fallback = story.get(field)
         if not isinstance(fallback, str) or not fallback.strip():
             continue
-        words = re.findall(r"[^\W_]+(?:['’\-][^\W_]+)*", fallback, flags=re.UNICODE)
-        if len(words) >= 5:
-            log.warning(
-                "Groq event_summary was missing or outside 5-15 words; using selected_story.%s.",
-                field,
-            )
-            return " ".join(words[:15])
+        return fallback.strip()
 
     raise ValueError(
-        "Groq selected_story must include an event_summary of 5 to 15 words "
-        "or a usable title or trend_rationale."
+        "Groq selected_story must include an event_summary or usable title."
     )
-
-
-def _story_keywords(text: str) -> set[str]:
-    return {
-        word.casefold()
-        for word in re.findall(r"[^\W_]+", text, flags=re.UNICODE)
-        if len(word) >= 3 and word.casefold() not in GENERIC_STORY_WORDS
-    }
-
-
-def _find_recent_story_overlap(story: dict, previous_summaries: list[str]) -> str | None:
-    current_texts = [
-        value.strip()
-        for value in (story.get("title", ""), story.get("event_summary", ""))
-        if isinstance(value, str) and value.strip()
-    ]
-    for previous_summary in previous_summaries:
-        previous_keywords = _story_keywords(previous_summary)
-        if not previous_keywords:
-            continue
-        for current_text in current_texts:
-            current_keywords = _story_keywords(current_text)
-            if not current_keywords:
-                continue
-            shared_keywords = current_keywords & previous_keywords
-            text_similarity = SequenceMatcher(
-                None,
-                " ".join(sorted(current_keywords)),
-                " ".join(sorted(previous_keywords)),
-            ).ratio()
-            if shared_keywords or text_similarity >= 0.72:
-                return previous_summary
-    return None
-
-
-def _validate_no_recent_story_overlap(
-    plan: dict,
-    previous_summaries: list[str],
-) -> None:
-    overlap = _find_recent_story_overlap(plan["selected_story"], previous_summaries)
-    if overlap:
-        raise ValueError(
-            "Groq selected a story that overlaps shortlisted news "
-            f"from shortlisted history: {overlap!r}."
-        )
 
 
 def _parse_event_timestamp(value: object) -> datetime | None:
@@ -268,36 +131,25 @@ def _posting_cooldown_rejection_reason(
 
 def _validate_research_result(
     result: dict,
-    previous_summaries: list[str] | None = None,
 ) -> None:
     metrics = result.get("research_metrics")
     if not isinstance(metrics, dict):
         raise ValueError("Groq research result must include research_metrics.")
     candidate_count = metrics.get("candidate_count")
     unique_count = metrics.get("unique_candidate_count")
-    if (
-        type(candidate_count) is not int
-        or type(unique_count) is not int
-        or not 0 <= candidate_count <= 5
-        or not 0 <= unique_count <= candidate_count
-    ):
-        raise ValueError("Groq research metrics must contain valid candidate counts.")
+    if type(candidate_count) is not int or type(unique_count) is not int:
+        raise ValueError("Groq research metrics must contain integer candidate counts.")
 
     assessment = result.get("publish_assessment")
     if not isinstance(assessment, dict):
         raise ValueError("Groq research result must include a structured publish_assessment.")
     if type(assessment.get("eligible")) is not bool:
         raise ValueError("Publish assessment eligible must be a boolean.")
-    if assessment.get("cooldown_exception") not in COOLDOWN_EXCEPTIONS:
-        raise ValueError("Publish assessment cooldown_exception must use a supported value.")
+    if not isinstance(assessment.get("cooldown_exception"), str):
+        raise ValueError("Publish assessment cooldown_exception must be a string.")
     for field in ("reason", "cooldown_exception_evidence"):
         if not isinstance(assessment.get(field), str):
             raise ValueError(f"Publish assessment {field} must be a string.")
-    if (
-        assessment["cooldown_exception"] != "NONE"
-        and not assessment["cooldown_exception_evidence"].strip()
-    ):
-        raise ValueError("A cooldown exception must include supporting evidence.")
 
     story = result.get("selected_story")
     if story is None:
@@ -306,93 +158,51 @@ def _validate_research_result(
         return
     if not isinstance(story, dict) or not isinstance(story.get("title"), str) or not story["title"].strip():
         raise ValueError("Groq selected_story must include a non-empty title or be null.")
-    if unique_count == 0:
-        raise ValueError("Groq cannot select a story when no unique candidate was found.")
     if assessment["eligible"]:
-        _validate_generated_plan(result, previous_summaries)
+        _validate_generated_plan_structure(result)
 
 
 def _publish_gate_rejection_reason(
     result: dict,
-    previous_summaries: list[str],
 ) -> str | None:
     assessment = result["publish_assessment"]
     if not assessment["eligible"]:
-        reason = assessment["reason"].strip() or "Groq rejected the story for publishing."
-    else:
-        reason = ""
-
-    story = result.get("selected_story")
-    if story is None:
-        reason = "No credible, non-duplicate news candidate was selected."
-    else:
-        overlap = _find_recent_story_overlap(story, previous_summaries)
-        if overlap:
-            reason = "The story overlaps shortlisted news and must not be selected again."
-    return reason or None
+        return assessment["reason"].strip() or "Groq rejected the story for publishing."
+    if result.get("selected_story") is None:
+        return "No candidate was selected."
+    return None
 
 
-def _validate_generated_plan(
-    plan: dict,
-    previous_summaries: list[str] | None = None,
-) -> None:
+def _validate_generated_plan_structure(plan: dict) -> None:
     story = plan.get("selected_story")
     if not isinstance(story, dict):
         raise ValueError("Groq Reel plan must include a selected_story object.")
     title = story.get("title")
     if not isinstance(title, str) or not title.strip():
         raise ValueError("Groq selected_story must include a non-empty title.")
-    _get_event_summary(story)
 
-    category = plan.get("category")
-    if category not in NEWS_CATEGORIES:
-        raise ValueError("Groq Reel plan must use one of the supported news categories.")
-    for field in ("headline", "image_body", "background_image_prompt", "description"):
+    for field in (
+        "category",
+        "headline",
+        "image_body",
+        "background_image_prompt",
+        "description",
+    ):
         value = plan.get(field)
         if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"Groq Reel plan must include a non-empty {field}.")
-    image_body_words = _summary_word_count(plan["image_body"])
-    if not 25 <= image_body_words <= 45:
-        raise ValueError("Groq image_body must contain 25 to 45 words for a self-contained Reel.")
-    description = plan["description"].strip()
-    if _summary_word_count(description) > 500:
-        raise ValueError("Groq description must not exceed 500 words.")
-    if len(description) > INSTAGRAM_CAPTION_LIMIT:
-        raise ValueError(
-            f"Groq description must not exceed Instagram's {INSTAGRAM_CAPTION_LIMIT}-character limit."
-        )
-    if description.casefold().count(ENGAGEMENT_CTA.casefold()) > 1:
-        raise ValueError('"Like, share and follow" must appear only once in the description.')
-    hashtags = plan.get("hashtags")
-    if not isinstance(hashtags, list) or not HASHTAG_MIN_COUNT <= len(hashtags) <= HASHTAG_MAX_COUNT:
-        raise ValueError("Groq Reel plan must include 5 to 15 relevant hashtags.")
-    if any(
-        not isinstance(hashtag, str)
-        or not re.fullmatch(r"#[^\s#]+", hashtag)
-        for hashtag in hashtags
-    ):
-        raise ValueError("Every Groq hashtag must be a single valid hashtag starting with #.")
-    if len({hashtag.casefold() for hashtag in hashtags}) != len(hashtags):
-        raise ValueError("Groq hashtags must be unique.")
-    prepared_caption = _prepare_description(plan)
-    if len(prepared_caption) > INSTAGRAM_CAPTION_LIMIT:
-        raise ValueError(
-            f"Groq description and hashtags together must fit Instagram's "
-            f"{INSTAGRAM_CAPTION_LIMIT}-character caption limit."
-        )
-    sources = plan.get("sources")
-    if not isinstance(sources, list) or not sources:
-        raise ValueError("Groq Reel plan must include at least one source.")
-    _validate_no_recent_story_overlap(plan, previous_summaries or [])
+            raise ValueError(f"Groq Reel plan must include a non-empty {field} string.")
+    hashtags = plan.get("hashtags", [])
+    if not isinstance(hashtags, list) or any(not isinstance(item, str) for item in hashtags):
+        raise ValueError("Groq Reel plan hashtags must be a list of strings.")
 
 
-def _make_ai_client(previous_summaries: list[str] | None = None) -> CloudAIResearcher:
+def _make_ai_client() -> CloudAIResearcher:
     api_keys = getattr(settings, "groq_api_keys", (settings.groq_api_key,))
     return CloudAIResearcher(
         settings.ai_provider,
         api_keys,
         settings.groq_model,
-        plan_validator=lambda plan: _validate_research_result(plan, previous_summaries),
+        plan_validator=_validate_research_result,
         credential_state_path=CREDENTIAL_ROTATION_PATH,
     )
 
@@ -417,18 +227,9 @@ def _generate_background(
 
 def _prepare_description(plan: dict) -> str:
     description = plan["description"].strip()
-    if ENGAGEMENT_CTA.casefold() not in description.casefold():
-        description = f"{description.rstrip()}\n\n{ENGAGEMENT_CTA}"
     hashtags = plan.get("hashtags", [])
     if hashtags:
         description = f"{description.rstrip()}\n\n{' '.join(hashtags)}"
-    if len(description) > INSTAGRAM_CAPTION_LIMIT:
-        raise ValueError(
-            f"Instagram description exceeds the {INSTAGRAM_CAPTION_LIMIT}-character limit "
-            "after adding the engagement call to action."
-        )
-    if _summary_word_count(description) > 500:
-        raise ValueError("Instagram description exceeds the 500-word limit.")
     return description
 
 
@@ -467,7 +268,7 @@ def run_pipeline(
         last_posted_at is not None
         and started_at.astimezone(timezone.utc) - last_posted_at < POSTING_COOLDOWN
     )
-    result = _make_ai_client(previous_summaries).research_and_generate_plan(
+    result = _make_ai_client().research_and_generate_plan(
         build_news_and_post_plan_prompt(
             previous_summaries,
             posting_cooldown_active=posting_cooldown_active,
@@ -477,7 +278,7 @@ def run_pipeline(
     )
     if not isinstance(result, dict):
         raise ValueError("Groq response must be a structured news-research JSON object.")
-    _validate_research_result(result, previous_summaries)
+    _validate_research_result(result)
     metrics = result["research_metrics"]
     assessment = result["publish_assessment"]
     log.info(
@@ -493,7 +294,7 @@ def run_pipeline(
         log.info("[SELECTION] No candidate was eligible for ranking.")
 
     log.info("[PUBLISH GATE] Cooldown exception: %s", assessment["cooldown_exception"])
-    rejection_reason = _publish_gate_rejection_reason(result, previous_summaries)
+    rejection_reason = _publish_gate_rejection_reason(result)
     cooldown_rejection_reason = _posting_cooldown_rejection_reason(
         assessment,
         last_posted_at,
@@ -533,7 +334,7 @@ def run_pipeline(
     log.info("[PUBLISH GATE] Decision: APPROVED")
     log.info("[PUBLISH GATE] Reason: %s", assessment["reason"])
     plan = result
-    _validate_generated_plan(plan, previous_summaries)
+    _validate_generated_plan_structure(plan)
 
     cloudinary_settings = None
     if not text_only:

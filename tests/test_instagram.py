@@ -54,6 +54,31 @@ class InstagramTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "publicly accessible HTTPS"):
             publisher.publish_reel("http://example.com/reel.mp4", "caption")
 
+    def test_publisher_sends_long_captions_without_local_length_validation(self):
+        class FakeResponse:
+            ok = True
+
+            def __init__(self, data):
+                self.data = data
+
+            def json(self):
+                return self.data
+
+        caption = "x" * 2201
+        responses = [
+            FakeResponse({"id": "container-123"}),
+            FakeResponse({"status_code": "FINISHED"}),
+            FakeResponse({"id": "123456"}),
+        ]
+        with patch("app.social.instagram.requests.request", side_effect=responses) as request:
+            publisher = InstagramPublisher("12345", "private-token", "v27.0")
+            publisher.publish_reel(
+                "https://res.cloudinary.com/demo/video/upload/reel.mp4",
+                caption,
+            )
+
+        self.assertEqual(request.call_args_list[0].kwargs["data"]["caption"], caption)
+
     def test_publisher_rejects_non_ready_reel_container(self):
         class FakeResponse:
             ok = True

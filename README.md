@@ -4,8 +4,8 @@ The pipeline uses Groq browser search to find and compare current news, Cloudfla
 
 ## What the pipeline creates
 
-1. Groq browser search selects one story from up to five recent, credible Indian news candidates, prioritizing verified events from the past 5 hours and ranking fresher events higher when impact is comparable. Duplicate screening conservatively rejects a candidate if even one distinctive keyword matches any of the latest 15 published-story summaries. The pipeline publishes an eligible story if no Reel was posted in the previous 3 hours; during that window, it publishes only evidence-backed rare events, unusual numbers, major sad events or achievements, important public-awareness news, or major changes. Otherwise the run is recorded as a successful skip.
-2. Groq assigns one type: **Crime, Politics, Geopolitics, Disaster, Achievement, BreakingNews, Business, Trends, EmergencyReporting,** or **Other**. The plan includes a concise image headline and explanation, a supporting illustration prompt, source metadata, a description of no more than 500 words, and 5–15 unique relevant hashtags appended to the Instagram caption.
+1. Groq browser search selects one story from up to five recent, credible Indian news candidates, prioritizing verified events from the past 5 hours and ranking fresher events higher when impact is comparable. Groq is instructed to compare candidates with all 15 latest published-story summaries and avoid repeats. Python does not independently reject a story for content, category, length, hashtag, source, or duplicate rules; it checks only the response structure. The pipeline still enforces the three-hour posting cooldown unless Groq supplies an approved exception with evidence.
+2. Groq is instructed to assign one type: **Crime, Politics, Geopolitics, Disaster, Achievement, BreakingNews, Business, Trends, EmergencyReporting,** or **Other**, and to provide a concise image headline and explanation, a supporting illustration prompt, source metadata, a description of no more than 500 words, and 5–15 unique relevant hashtags. At publish time, the caption also gets `#reels #reelsinstagram #explorepage #trending #viral`; tags already present are not duplicated.
 3. Cloudflare creates a bright, vivid, story-relevant editorial illustration with no generated lettering. Pillow boosts color and brightness with only a subtle readability gradient, then overlays the channel name, headline, story explanation and “Like, share and follow” on a 1080×1920 image. The story type is used for BGM selection but is not printed as a type label.
 4. The still image is encoded as a 15-second, 30-fps H.264 MP4. The app searches `BGM` for an audio filename matching the selected category, ignoring case and spaces (for example, `Major Sad Event` matches `majorsadevent.mp3`). If no category match exists, it uses a supported audio file named `Other` such as `Other.m4a`. The selected audio loops or is trimmed to fill the Reel; the image does not pan or animate.
 5. If Cloudinary is configured, the MP4 is uploaded to a public HTTPS URL for Instagram to fetch. Publishing is always an explicit opt-in.
@@ -26,7 +26,7 @@ notepad .env
 
 Set `GROQ_MODEL=openai/gpt-oss-20b` and add credentials to `.env`. For Groq, configure one or more comma-separated keys in `GROQ_API_KEYS` or `GROQ_API_KEY`. For Cloudflare, configure matching comma-separated values in `CLOUDFLARE_ACCOUNT_IDS` and `CLOUDFLARE_API_TOKENS`, or use the singular variables for one credential. Values at matching positions are paired.
 
-Each Groq and Cloudflare request uses exactly one credential, selected in persistent round-robin order. A failed request is reported and does not trigger a retry with another token. The next request rotates to the next configured credential. The index is stored in `credential_rotation.json`; do not commit `.env`.
+Each request uses one credential selected in persistent round-robin order. Groq retries HTTP failures with the next configured key, at most once per key; malformed responses and schema failures are reported without retrying. Cloudflare image requests do not retry. The index is stored in `credential_rotation.json`; do not commit `.env`.
 
 Groq browser search is supported with `openai/gpt-oss-20b` or `openai/gpt-oss-120b`; availability and quota depend on the Groq account. If Groq returns HTTP 401 for every key, replace revoked, expired, or mistyped keys. HTTP 429 indicates rate limiting or exhausted quota and may affect keys in the same organization.
 
@@ -73,7 +73,7 @@ The workflow at `.github/workflows/scheduled-instagram.yml` runs every 30 minute
 0 3-14 * * *
 ```
 
-Together these run at 02:30 UTC, then every 30 minutes through 14:30 UTC (08:00–20:00 IST). Each run independently researches news and applies the same three-hour publishing rule. A skipped story exits with status 0 and is recorded in `output/<run>/run_summary.json`; `groq_response.txt` contains the compact assessment. Manual **Run workflow** follows the same gate.
+Together these run at 02:30 UTC, then every 30 minutes through 14:30 UTC (08:00–20:00 IST). Each run independently researches news and applies the same three-hour publishing rule. A skipped story exits with status 0 and is recorded in `output/<run>/run_summary.json`. The raw Groq response is saved as `groq_response.txt`; response-schema errors include the failed check in the log, and failed workflow runs upload the response as a seven-day artifact when available. Manual **Run workflow** follows the same gate.
 
 Configure these repository Actions secrets under **Settings → Secrets and variables → Actions**:
 

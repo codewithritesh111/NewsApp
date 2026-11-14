@@ -137,6 +137,9 @@ class CloudAIResearcher:
                 continue
 
             content = self._content(data)
+            if raw_output_path is not None:
+                raw_output_path.parent.mkdir(parents=True, exist_ok=True)
+                raw_output_path.write_text(content, encoding="utf-8")
             plan = self._extract_json(content)
             validator = getattr(self, "plan_validator", None)
             if validator is not None:
@@ -144,7 +147,7 @@ class CloudAIResearcher:
                     validator(plan)
                 except ValueError as exc:
                     raise AIProviderError(
-                        "Groq returned an invalid single-image Reel plan."
+                        f"Groq returned an invalid response structure: {exc}"
                     ) from exc
             break
         else:
@@ -169,7 +172,4 @@ class CloudAIResearcher:
                 f"credentials. Last error: {last_http_error}"
             ) from last_http_error
 
-        if raw_output_path is not None:
-            raw_output_path.parent.mkdir(parents=True, exist_ok=True)
-            raw_output_path.write_text(content, encoding="utf-8")
         return plan

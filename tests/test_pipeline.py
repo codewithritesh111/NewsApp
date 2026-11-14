@@ -23,9 +23,10 @@ from app.pipeline import (
     POSTING_COOLDOWN,
     _generate_background,
     _get_event_summary,
+    _prepare_description,
     _posting_cooldown_rejection_reason,
     _publish_gate_rejection_reason,
-    _validate_generated_plan,
+    _validate_generated_plan_structure,
     _validate_research_result,
     run_pipeline,
 )
@@ -71,7 +72,7 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertIn(f'"{category}"', prompt)
             self.assertEqual(prompt.count(f'"{category}"'), 1)
 
-    def test_research_result_rejects_more_than_five_candidates(self):
+    def test_research_result_requires_integer_candidate_counts(self):
         result = _approve_test_plan(
             {
                 "selected_story": {
@@ -80,10 +81,10 @@ class TrendPipelineTests(unittest.TestCase):
                 },
             }
         )
-        result["research_metrics"]["candidate_count"] = 6
+        result["research_metrics"]["candidate_count"] = "five"
         result["publish_assessment"]["eligible"] = False
 
-        with self.assertRaisesRegex(ValueError, "valid candidate counts"):
+        with self.assertRaisesRegex(ValueError, "integer candidate counts"):
             _validate_research_result(result)
 
     def test_multiple_credentials_are_parsed_and_cloudflare_pairs_stay_aligned(self):
@@ -188,9 +189,12 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertEqual(_get_event_summary(story), story["event_summary"])
 
     def test_event_summary_falls_back_to_selected_story_title(self):
-        story = {"title": "CRPF Injured in Kulgam Attack"}
+        story = {"title": "CRPF Injured"}
 
         self.assertEqual(_get_event_summary(story), story["title"])
+
+    def test_event_summary_accepts_any_non_empty_summary(self):
+        self.assertEqual(_get_event_summary({"event_summary": "One word"}), "One word")
 
     def test_nonbreaking_hyphens_are_normalized_before_rendering(self):
         self.assertEqual(
@@ -266,151 +270,63 @@ class TrendPipelineTests(unittest.TestCase):
             "groq",
             ["first-key", "second-key"],
             "openai/gpt-oss-20b",
-            plan_validator=_validate_generated_plan,
+            plan_validator=_validate_generated_plan_structure,
         )
-        response = {"choices": [{"message": {"content": json.dumps({"slides": []})}}]}
+        content = json.dumps({"slides": []})
+        response = {"choices": [{"message": {"content": content}}]}
         keys_seen = []
 
         def fake_post(_payload, api_key):
             keys_seen.append(api_key)
             return response
 
-        with patch.object(client, "_post", side_effect=fake_post):
-            with self.assertRaisesRegex(AIProviderError, "invalid single-image Reel plan"):
-                client.research_and_generate_plan("Return a plan")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            raw_output = Path(temp_dir) / "groq_response.txt"
+            with patch.object(client, "_post", side_effect=fake_post):
+                with self.assertRaisesRegex(
+                    AIProviderError,
+                    "invalid response structure: Groq Reel plan must include a selected_story object",
+                ):
+                    client.research_and_generate_plan("Return a plan", raw_output_path=raw_output)
+
+            self.assertEqual(raw_output.read_text(encoding="utf-8"), content)
 
         self.assertEqual(keys_seen, ["first-key"])
 
-    def test_plan_validator_enforces_category_description_and_sources(self):
+    def test_plan_structure_leaves_content_rules_to_groq(self):
         plan = {
             "selected_story": {
                 "title": "A verified current news development",
-                "event_summary": "A verified current news development affects local residents",
+                "event_summary": "Brief",
             },
-            "category": "Other",
+            "category": "Unsupported but still a string",
             "headline": "A verified current news update",
-            "image_body": (
-                "The latest verified update changes the way affected people access this service, "
-                "with officials confirming the main decision today. The next steps will determine "
-                "how quickly people and businesses feel its practical impact across India."
-            ),
+            "image_body": "Too short",
             "background_image_prompt": "A relevant editorial illustration.",
-            "description": "A factual news description.",
-            "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
-            "sources": [{"url": "https://news.example/story"}],
+            "description": "news " * 501,
+            "hashtags": ["#news", "#news", "not a valid hashtag"],
+            "sources": [],
         }
 
-        with self.assertRaisesRegex(ValueError, "supported news categories"):
-            plan["category"] = "Public interest"
-            _validate_generated_plan(plan)
-
-        plan["category"] = "Other"
-        _validate_generated_plan(plan)
-
-        plan["description"] = "news " * 501
-        with self.assertRaisesRegex(ValueError, "500 words"):
-            _validate_generated_plan(plan)
-
-        plan["description"] = "A factual news description."
-        plan["sources"] = []
-        with self.assertRaisesRegex(ValueError, "at least one source"):
-            _validate_generated_plan(plan)
-
-    def test_plan_validator_requires_five_to_fifteen_unique_valid_hashtags(self):
-        plan = {
-            "selected_story": {
-                "title": "A verified current news development",
-                "event_summary": "A verified current news development affects local residents",
-            },
-            "category": "Other",
-            "headline": "A verified current news update",
-            "image_body": (
-                "The latest verified update changes the way affected people access this service, "
-                "with officials confirming the main decision today. The next steps will determine "
-                "how quickly people and businesses feel its practical impact across India."
-            ),
-            "background_image_prompt": "A relevant editorial illustration.",
-            "description": "A factual news description.",
-            "hashtags": ["#News", "#India", "#Technology", "#Update"],
-            "sources": [{"url": "https://news.example/story"}],
-        }
-        with self.assertRaisesRegex(ValueError, "5 to 15 relevant hashtags"):
-            _validate_generated_plan(plan)
-
-        plan["hashtags"].append("#PublicInterest")
-        _validate_generated_plan(plan)
-
-        plan["hashtags"][-1] = "#news"
-        with self.assertRaisesRegex(ValueError, "must be unique"):
-            _validate_generated_plan(plan)
-
-        plan["hashtags"][-1] = "#Hashtag With Spaces"
-        with self.assertRaisesRegex(ValueError, "single valid hashtag"):
-            _validate_generated_plan(plan)
-
-    def test_plan_validator_rejects_repeated_main_keywords_from_history(self):
-        plan = {
-            "selected_story": {
-                "title": "ISRO successfully test fires GSLV rocket engine",
-                "event_summary": "ISRO tests GSLV rocket engine ahead of NVS 04 launch",
-            },
-            "category": "Other",
-            "headline": "ISRO Tests GSLV Engine",
-            "image_body": (
-                "ISRO successfully completed a ground test of the GSLV rocket engine, "
-                "an important step toward preparing the launch vehicle for the upcoming "
-                "navigation satellite mission and its planned launch schedule."
-            ),
-            "background_image_prompt": "A rocket engine editorial illustration.",
-            "description": "A factual update. Like, share and follow",
-            "hashtags": ["#ISRO", "#GSLV", "#Rocket", "#Space", "#India"],
-            "sources": [{"url": "https://news.example/story"}],
-        }
-
-        with self.assertRaisesRegex(ValueError, "overlaps shortlisted news"):
-            _validate_generated_plan(
-                plan,
-                ["ISRO test fires GSLV rocket engine ahead of NVS 04 launch"],
-            )
-
-        with self.assertRaisesRegex(ValueError, "overlaps shortlisted news"):
-            _validate_generated_plan(
-                plan,
-                ["ISRO announces a new Chandrayaan lunar science instrument"],
-            )
-
-        _validate_generated_plan(
-            plan,
-            ["Rajasthan announces new water conservation rules for farmers"],
+        _validate_generated_plan_structure(plan)
+        self.assertEqual(
+            _prepare_description(plan),
+            f"{plan['description'].strip()}\n\n{' '.join(plan['hashtags'])}",
         )
 
-    def test_plan_validator_rejects_small_overlap_with_a_shortlisted_event(self):
+    def test_plan_structure_still_rejects_malformed_types(self):
         plan = {
-            "selected_story": {
-                "title": "ISRO announces revised NVS schedule",
-                "event_summary": (
-                    "ISRO announces updated timeline for NVS mission following "
-                    "its completed satellite integration review"
-                ),
-            },
+            "selected_story": {"title": "A current India story"},
             "category": "Other",
-            "headline": "ISRO Updates Satellite Schedule",
-            "image_body": (
-                "ISRO has announced an updated schedule for the NVS satellite mission after "
-                "a completed integration review. The revised timeline changes the next steps "
-                "for the navigation satellite program and its planned launch preparations."
-            ),
-            "background_image_prompt": "A satellite editorial illustration.",
-            "description": "A factual update. Like, share and follow",
-            "hashtags": ["#ISRO", "#NVS", "#Satellite", "#Space", "#India"],
-            "sources": [{"url": "https://news.example/story"}],
+            "headline": "Headline",
+            "image_body": "Body",
+            "background_image_prompt": "Prompt",
+            "description": "Description",
+            "hashtags": ["#India", 5],
         }
 
-        with self.assertRaisesRegex(ValueError, "overlaps shortlisted news"):
-            _validate_generated_plan(
-                plan,
-                ["ISRO test fires engine ahead of NVS 04 satellite launch"],
-            )
+        with self.assertRaisesRegex(ValueError, "hashtags must be a list of strings"):
+            _validate_generated_plan_structure(plan)
 
     def test_publish_gate_uses_candidate_eligibility_without_extra_ratings(self):
         result = _approve_test_plan(
@@ -421,10 +337,10 @@ class TrendPipelineTests(unittest.TestCase):
                 },
             }
         )
-        self.assertIsNone(_publish_gate_rejection_reason(result, []))
+        self.assertIsNone(_publish_gate_rejection_reason(result))
         self.assertNotIn("actual_event_at", result["publish_assessment"])
 
-    def test_publish_gate_rejects_shortlisted_story_even_with_new_development(self):
+    def test_publish_gate_leaves_duplicate_screening_to_groq(self):
         result = _approve_test_plan(
             {
                 "selected_story": {
@@ -433,12 +349,7 @@ class TrendPipelineTests(unittest.TestCase):
                 },
             }
         )
-        rejection_reason = _publish_gate_rejection_reason(
-            result,
-            ["ISRO test fires GSLV rocket engine ahead of NVS 04 launch"],
-        )
-
-        self.assertIn("must not be selected again", rejection_reason)
+        self.assertIsNone(_publish_gate_rejection_reason(result))
 
     def test_posting_cooldown_requires_wait_unless_story_meets_an_exception(self):
         now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)

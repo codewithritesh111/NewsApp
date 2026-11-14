@@ -54,6 +54,15 @@ jobs:
       - name: Research news and publish only eligible Reels
         run: python -m app.main --publish-instagram
 
+      - name: Save Groq response for failed runs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: groq-response-debug
+          path: output/**/groq_response.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Persist posting and duplicate-detection history
         if: always()
         run: |
