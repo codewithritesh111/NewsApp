@@ -59,7 +59,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: groq-response-debug
-          path: output/**/groq_response.txt
+          path: |
+            output/**/groq_response.txt
+            output/**/groq_response_metadata.json
           if-no-files-found: ignore
           retention-days: 7
 

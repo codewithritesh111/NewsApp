@@ -710,6 +710,76 @@ class TrendPipelineTests(unittest.TestCase):
             ["Bearer first-key", "Bearer second-key"],
         )
 
+    def test_groq_empty_content_logs_safe_metadata_without_retrying(self):
+        response_data = {
+            "id": "request-123",
+            "model": "openai/gpt-oss-20b",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "browser_search",
+                                    "arguments": "{}",
+                                },
+                            },
+                        ],
+                    },
+                },
+            ],
+            "usage": {
+                "prompt_tokens": 123,
+                "completion_tokens": 0,
+                "total_tokens": 123,
+            },
+        }
+        client = CloudAIResearcher(
+            "groq",
+            ["first-key", "second-key"],
+            "openai/gpt-oss-20b",
+        )
+        keys_seen = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            raw_output = Path(temp_dir) / "groq_response.txt"
+
+            def fake_post(_payload, api_key):
+                keys_seen.append(api_key)
+                return response_data
+
+            with self.assertLogs("app.intelligence.cloud_ai_client", level="INFO") as captured:
+                with patch.object(client, "_post", side_effect=fake_post):
+                    with self.assertRaisesRegex(AIProviderError, "empty message content"):
+                        client.research_and_generate_plan(
+                            "Return a plan",
+                            raw_output_path=raw_output,
+                        )
+
+            metadata = json.loads(
+                raw_output.with_name("groq_response_metadata.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            log_output = "\n".join(captured.output)
+
+            self.assertFalse(raw_output.exists())
+            self.assertEqual(metadata["configured_key_count"], 2)
+            self.assertEqual(metadata["attempt"], 1)
+            self.assertEqual(metadata["choices"][0]["finish_reason"], "tool_calls")
+            self.assertEqual(metadata["choices"][0]["content_type"], "null")
+            self.assertEqual(metadata["choices"][0]["tool_names"], ["browser_search"])
+            self.assertEqual(metadata["usage"]["completion_tokens"], 0)
+            self.assertIn("Request attempt 1/2", log_output)
+            self.assertIn("key rotation only retries HTTP status errors", log_output)
+            self.assertNotIn("first-key", log_output)
+            self.assertNotIn("second-key", log_output)
+            self.assertEqual(keys_seen, ["first-key"])
+
     def test_groq_429_error_explains_quota_and_credential_configuration(self):
         client = CloudAIResearcher(
             "groq",

@@ -92,6 +92,84 @@ class CloudAIResearcher:
             raise AIProviderError("Groq returned empty message content.")
         return content.strip()
 
+    @staticmethod
+    def _response_metadata(
+        data: dict[str, Any],
+        attempt: int,
+        credential_count: int,
+    ) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {
+                "attempt": attempt,
+                "configured_key_count": credential_count,
+                "response_type": type(data).__name__,
+            }
+        choices = data.get("choices")
+        choice_metadata = []
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    message = {}
+                content = message.get("content")
+                if isinstance(content, str):
+                    content_type = "string"
+                    content_length = len(content)
+                elif isinstance(content, list):
+                    content_type = "list"
+                    content_length = sum(
+                        len(item["text"])
+                        for item in content
+                        if isinstance(item, dict) and isinstance(item.get("text"), str)
+                    )
+                else:
+                    content_type = "null" if content is None else type(content).__name__
+                    content_length = 0 if content is None else None
+                tool_calls = message.get("tool_calls")
+                tool_names = []
+                if isinstance(tool_calls, list):
+                    for tool_call in tool_calls:
+                        function = (
+                            tool_call.get("function")
+                            if isinstance(tool_call, dict)
+                            else None
+                        )
+                        if isinstance(function, dict) and isinstance(function.get("name"), str):
+                            tool_names.append(function["name"])
+                choice_metadata.append(
+                    {
+                        "finish_reason": choice.get("finish_reason"),
+                        "message_role": message.get("role"),
+                        "content_present": "content" in message,
+                        "content_type": content_type,
+                        "content_length": content_length,
+                        "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+                        "tool_names": tool_names,
+                        "refusal_present": bool(message.get("refusal")),
+                    }
+                )
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            usage = {
+                key: value
+                for key, value in usage.items()
+                if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                and type(value) is int
+            }
+        else:
+            usage = None
+        return {
+            "attempt": attempt,
+            "configured_key_count": credential_count,
+            "response_id": data.get("id") if isinstance(data.get("id"), str) else None,
+            "response_model": data.get("model") if isinstance(data.get("model"), str) else None,
+            "choice_count": len(choices) if isinstance(choices, list) else None,
+            "choices": choice_metadata,
+            "usage": usage,
+        }
+
     def research_and_generate_plan(
         self,
         prompt: str,
@@ -121,8 +199,14 @@ class CloudAIResearcher:
 
         credential_count = self.credentials.credential_count
         last_http_error: _GroqHTTPError | None = None
+        log.info(
+            "[GROQ] Request model=%s; configured keys=%d.",
+            self.model,
+            credential_count,
+        )
         for attempt in range(credential_count):
             api_key = self.credentials.next_credential()
+            log.info("[GROQ] Request attempt %d/%d.", attempt + 1, credential_count)
             try:
                 data = self._post(payload, api_key)
             except _GroqHTTPError as exc:
@@ -136,9 +220,26 @@ class CloudAIResearcher:
                     )
                 continue
 
-            content = self._content(data)
+            metadata = self._response_metadata(data, attempt + 1, credential_count)
+            log.info("[GROQ] Response metadata: %s", json.dumps(metadata, sort_keys=True))
             if raw_output_path is not None:
                 raw_output_path.parent.mkdir(parents=True, exist_ok=True)
+                raw_output_path.with_name("groq_response_metadata.json").write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            try:
+                content = self._content(data)
+            except AIProviderError as exc:
+                log.error(
+                    "[GROQ] Response attempt %d/%d was unusable (%s); key rotation only "
+                    "retries HTTP status errors.",
+                    attempt + 1,
+                    credential_count,
+                    exc,
+                )
+                raise
+            if raw_output_path is not None:
                 raw_output_path.write_text(content, encoding="utf-8")
             plan = self._extract_json(content)
             validator = getattr(self, "plan_validator", None)

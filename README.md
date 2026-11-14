@@ -73,7 +73,7 @@ The workflow at `.github/workflows/scheduled-instagram.yml` runs every 30 minute
 0 3-14 * * *
 ```
 
-Together these run at 02:30 UTC, then every 30 minutes through 14:30 UTC (08:00–20:00 IST). Each run independently researches news and applies the same three-hour publishing rule. A skipped story exits with status 0 and is recorded in `output/<run>/run_summary.json`. The raw Groq response is saved as `groq_response.txt`; response-schema errors include the failed check in the log, and failed workflow runs upload the response as a seven-day artifact when available. Manual **Run workflow** follows the same gate.
+Together these run at 02:30 UTC, then every 30 minutes through 14:30 UTC (08:00–20:00 IST). Each run independently researches news and applies the same three-hour publishing rule. A skipped story exits with status 0 and is recorded in `output/<run>/run_summary.json`. Groq attempt counts and safe response metadata are logged; failed workflow runs upload response diagnostics as a seven-day artifact when available. Manual **Run workflow** follows the same gate.
 
 Configure these repository Actions secrets under **Settings → Secrets and variables → Actions**:
 
