@@ -17,6 +17,8 @@ class Settings:
     ai_provider: str = os.getenv("AI_PROVIDER", "groq").strip().lower()
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
     groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+    groq_reasoning_effort: str = os.getenv("GROQ_REASONING_EFFORT", "low").strip()
+    groq_max_completion_tokens: int = int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "9000"))
     output_dir: Path = PROJECT_ROOT / os.getenv("OUTPUT_DIR", "output")
     brand_name: str = os.getenv("BRAND_NAME", "The Daily Chronicle")
     cloudflare_account_id: str = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")

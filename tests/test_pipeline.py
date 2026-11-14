@@ -814,6 +814,36 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertNotIn("second-key", log_output)
             self.assertEqual(keys_seen, ["first-key"])
 
+    def test_groq_payload_includes_reasoning_effort_and_handles_length_finish_reason(self):
+        client = CloudAIResearcher(
+            "groq",
+            ["test-key"],
+            "openai/gpt-oss-20b",
+            reasoning_effort="low",
+        )
+        payloads_seen = []
+
+        def fake_post(payload, _api_key):
+            payloads_seen.append(payload)
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": ""},
+                    }
+                ]
+            }
+
+        with patch.object(client, "_post", side_effect=fake_post):
+            with self.assertRaisesRegex(
+                AIProviderError,
+                r"empty message content \(finish_reason='length'\)",
+            ):
+                client.research_and_generate_plan("Return a plan", 9000)
+
+        self.assertEqual(payloads_seen[0]["reasoning_effort"], "low")
+        self.assertEqual(payloads_seen[0]["max_completion_tokens"], 9000)
+
     def test_groq_429_error_explains_quota_and_credential_configuration(self):
         client = CloudAIResearcher(
             "groq",
@@ -1055,7 +1085,7 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertFalse((run_dir / "google_news_rss.json").exists())
             self.assertFalse((run_dir / "candidates.json").exists())
             prompt, max_tokens = requests_seen[0]
-            self.assertEqual(max_tokens, 3500)
+            self.assertEqual(max_tokens, 9000)
             self.assertIn("browser_search", prompt.lower())
             self.assertIn("5 latest", prompt.lower())
             self.assertIn("rank by recency", prompt.lower())

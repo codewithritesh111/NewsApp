@@ -204,6 +204,7 @@ def _make_ai_client() -> CloudAIResearcher:
         settings.groq_model,
         plan_validator=_validate_research_result,
         credential_state_path=CREDENTIAL_ROTATION_PATH,
+        reasoning_effort=getattr(settings, "groq_reasoning_effort", "low"),
     )
 
 
@@ -268,12 +269,13 @@ def run_pipeline(
         last_posted_at is not None
         and started_at.astimezone(timezone.utc) - last_posted_at < POSTING_COOLDOWN
     )
+    max_tokens = getattr(settings, "groq_max_completion_tokens", 9000)
     result = _make_ai_client().research_and_generate_plan(
         build_news_and_post_plan_prompt(
             previous_summaries,
             posting_cooldown_active=posting_cooldown_active,
         ),
-        3500,
+        max_tokens,
         run_dir / "groq_response.txt",
     )
     if not isinstance(result, dict):

@@ -29,6 +29,7 @@ class CloudAIResearcher:
         model: str,
         plan_validator: Callable[[dict[str, Any]], None] | None = None,
         credential_state_path: Path | None = None,
+        reasoning_effort: str = "low",
     ):
         if (provider or "").strip().lower() != "groq":
             raise ValueError("This workflow requires Groq browser_search. Set AI_PROVIDER=groq.")
@@ -44,6 +45,7 @@ class CloudAIResearcher:
             )
         self.model = model
         self.plan_validator = plan_validator
+        self.reasoning_effort = reasoning_effort
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
@@ -110,7 +112,10 @@ class CloudAIResearcher:
     @staticmethod
     def _content(data: dict[str, Any]) -> str:
         try:
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            message = choice["message"]
+            content = message.get("content")
+            finish_reason = choice.get("finish_reason")
         except (KeyError, IndexError, TypeError) as exc:
             raise AIProviderError("Groq response did not contain message content.") from exc
         if isinstance(content, list):
@@ -118,6 +123,11 @@ class CloudAIResearcher:
                 item.get("text", "") for item in content if isinstance(item, dict)
             )
         if not isinstance(content, str) or not content.strip():
+            if finish_reason == "length":
+                raise AIProviderError(
+                    "Groq returned empty message content (finish_reason='length'); "
+                    "the model exhausted its token limit during reasoning."
+                )
             raise AIProviderError("Groq returned empty message content.")
         return content.strip()
 
@@ -235,6 +245,9 @@ class CloudAIResearcher:
             "tool_choice": "required",
             "tools": [{"type": "browser_search"}],
         }
+        reasoning_effort = getattr(self, "reasoning_effort", "low")
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
 
         credential_count = self.credentials.credential_count
         last_http_error: _GroqHTTPError | None = None
