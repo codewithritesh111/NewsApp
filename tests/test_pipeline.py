@@ -685,15 +685,15 @@ class TrendPipelineTests(unittest.TestCase):
                 previous_summaries,
             )
 
-    def test_groq_client_rotates_on_next_request_without_failing_over(self):
+    def test_groq_client_retries_http_error_with_the_next_key(self):
         plan = {"selected_story": {"title": "A current India story"}, "slides": [{"headline": "Update"}]}
         client = CloudAIResearcher(
             "groq",
             ["first-key", "second-key"],
             "openai/gpt-oss-20b",
         )
-        timeout_response = SimpleNamespace(
-            status_code=524,
+        server_error = SimpleNamespace(
+            status_code=503,
             ok=False,
         )
         success_response = SimpleNamespace(
@@ -706,9 +706,86 @@ class TrendPipelineTests(unittest.TestCase):
 
         with patch(
             "app.intelligence.cloud_ai_client.requests.post",
-            side_effect=[timeout_response, success_response],
+            side_effect=[server_error, success_response],
         ) as post:
-            with self.assertRaisesRegex(AIProviderError, "HTTP 524"):
+            result = client.research_and_generate_plan("Return a plan")
+
+        self.assertEqual(result, plan)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(
+            [
+                call.kwargs["headers"]["Authorization"]
+                for call in post.call_args_list
+            ],
+            ["Bearer first-key", "Bearer second-key"],
+        )
+
+    def test_groq_client_does_not_retry_when_publish_checks_reject_story(self):
+        rejected_plan = {
+            "research_metrics": {
+                "candidate_count": 5,
+                "unique_candidate_count": 5,
+            },
+            "selected_story": {
+                "title": "A current story that fails publishing checks",
+            },
+            "publish_assessment": {
+                "eligible": False,
+                "reason": "The selected story does not meet the publishing checks.",
+                "cooldown_exception": "NONE",
+                "cooldown_exception_evidence": "",
+            },
+        }
+        client = CloudAIResearcher(
+            "groq",
+            ["first-key", "second-key"],
+            "openai/gpt-oss-20b",
+            plan_validator=_validate_research_result,
+        )
+        response = SimpleNamespace(
+            status_code=200,
+            ok=True,
+            json=lambda: {
+                "choices": [
+                    {"message": {"content": json.dumps(rejected_plan)}},
+                ],
+            },
+        )
+
+        with patch(
+            "app.intelligence.cloud_ai_client.requests.post",
+            return_value=response,
+        ) as post:
+            result = client.research_and_generate_plan("Return a plan")
+
+        self.assertEqual(result, rejected_plan)
+        self.assertEqual(post.call_count, 1)
+
+    def test_groq_client_rotates_on_next_request_after_non_http_error(self):
+        plan = {"selected_story": {"title": "A current India story"}, "slides": [{"headline": "Update"}]}
+        client = CloudAIResearcher(
+            "groq",
+            ["first-key", "second-key"],
+            "openai/gpt-oss-20b",
+        )
+        empty_response = SimpleNamespace(
+            status_code=200,
+            ok=True,
+            json=lambda: {"choices": [{"message": {"content": ""}}]},
+        )
+        success_response = SimpleNamespace(
+            status_code=200,
+            ok=True,
+            json=lambda: {
+                "choices": [{"message": {"content": json.dumps(plan)}}],
+            },
+        )
+
+        with patch(
+            "app.intelligence.cloud_ai_client.requests.post",
+            side_effect=[empty_response, success_response],
+        ) as post:
+            with self.assertRaisesRegex(AIProviderError, "empty message content"):
                 client.research_and_generate_plan("Return a plan")
             result = client.research_and_generate_plan("Return a plan")
 
@@ -736,11 +813,11 @@ class TrendPipelineTests(unittest.TestCase):
         ) as post:
             with self.assertRaisesRegex(
                 AIProviderError,
-                r"HTTP 429.*selected round-robin credential.*GROQ_API_KEYS.*share quota",
+                r"HTTP 429.*trying all 2 configured credentials.*GROQ_API_KEYS.*share quota",
             ):
                 client.research_and_generate_plan("Return a plan")
 
-        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_count, 2)
 
     def test_groq_401_error_explains_key_rejection_and_rotation(self):
         client = CloudAIResearcher(
@@ -756,11 +833,11 @@ class TrendPipelineTests(unittest.TestCase):
         ) as post:
             with self.assertRaisesRegex(
                 AIProviderError,
-                r"HTTP 401.*selected round-robin credential.*GROQ_API_KEYS.*restart the app",
+                r"HTTP 401.*trying all 2 configured credentials.*GROQ_API_KEYS.*restart the app",
             ):
                 client.research_and_generate_plan("Return a plan")
 
-        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_count, 2)
 
     def test_composer_renders_dense_copy_and_distinct_key_fact(self):
         body = (

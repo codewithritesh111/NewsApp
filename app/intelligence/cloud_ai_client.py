@@ -1,5 +1,6 @@
 """Groq client for hosted browser research and single-image Reel plans."""
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -8,6 +9,15 @@ from typing import Any
 import requests
 
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
+
+log = logging.getLogger(__name__)
+
+
+class _GroqHTTPError(AIProviderError):
+    def __init__(self, status_code: int):
+        super().__init__(f"Groq HTTP {status_code}.")
+        self.status_code = status_code
+
 
 class CloudAIResearcher:
     URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -62,7 +72,7 @@ class CloudAIResearcher:
         except requests.RequestException as exc:
             raise AIProviderError("Groq request failed.") from exc
         if not response.ok:
-            raise AIProviderError(f"Groq HTTP {response.status_code}.")
+            raise _GroqHTTPError(response.status_code)
         try:
             return response.json()
         except (requests.RequestException, ValueError) as exc:
@@ -110,9 +120,23 @@ class CloudAIResearcher:
         }
 
         credential_count = self.credentials.credential_count
-        api_key = self.credentials.next_credential()
-        try:
-            content = self._content(self._post(payload, api_key))
+        last_http_error: _GroqHTTPError | None = None
+        for attempt in range(credential_count):
+            api_key = self.credentials.next_credential()
+            try:
+                data = self._post(payload, api_key)
+            except _GroqHTTPError as exc:
+                last_http_error = exc
+                if attempt + 1 < credential_count:
+                    log.warning(
+                        "Groq returned HTTP %d with credential %d/%d; trying the next key.",
+                        exc.status_code,
+                        attempt + 1,
+                        credential_count,
+                    )
+                continue
+
+            content = self._content(data)
             plan = self._extract_json(content)
             validator = getattr(self, "plan_validator", None)
             if validator is not None:
@@ -122,21 +146,28 @@ class CloudAIResearcher:
                     raise AIProviderError(
                         "Groq returned an invalid single-image Reel plan."
                     ) from exc
-        except AIProviderError as exc:
-            if "HTTP 429" in str(exc):
+            break
+        else:
+            if last_http_error is None:
+                raise AIProviderError("Groq request failed without an HTTP response.")
+            if last_http_error.status_code == 429:
                 raise AIProviderError(
-                    "Groq returned HTTP 429 using the selected round-robin credential. "
-                    f"Check Groq account limits and configure active keys in GROQ_API_KEYS "
+                    f"Groq returned HTTP 429 after trying all {credential_count} "
+                    "configured credentials. Check Groq account limits and configure "
+                    "active keys in GROQ_API_KEYS "
                     f"({credential_count} configured). Keys in the same organization "
                     "may share quota."
-                ) from exc
-            if "HTTP 401" in str(exc):
+                ) from last_http_error
+            if last_http_error.status_code == 401:
                 raise AIProviderError(
-                    "Groq returned HTTP 401 using the selected round-robin credential. "
-                    "Check GROQ_API_KEYS (or GROQ_API_KEY), replace rejected keys, "
-                    "and restart the app."
-                ) from exc
-            raise
+                    f"Groq returned HTTP 401 after trying all {credential_count} "
+                    "configured credentials. Check GROQ_API_KEYS (or GROQ_API_KEY), "
+                    "replace rejected keys, and restart the app."
+                ) from last_http_error
+            raise AIProviderError(
+                f"Groq request failed after trying all {credential_count} configured "
+                f"credentials. Last error: {last_http_error}"
+            ) from last_http_error
 
         if raw_output_path is not None:
             raw_output_path.parent.mkdir(parents=True, exist_ok=True)
