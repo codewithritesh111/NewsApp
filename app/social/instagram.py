@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 
 import requests
 
+INSTAGRAM_CAPTION_LIMIT = 2200
+
 
 class InstagramPublishingError(RuntimeError):
     pass
@@ -117,6 +119,10 @@ class InstagramPublisher:
         parsed_url = urlsplit(video_url)
         if parsed_url.scheme != "https" or not parsed_url.netloc:
             raise ValueError("Instagram Reel video URL must be publicly accessible HTTPS.")
+        if len(caption) > INSTAGRAM_CAPTION_LIMIT:
+            raise ValueError(
+                f"Instagram captions cannot exceed {INSTAGRAM_CAPTION_LIMIT} characters."
+            )
         container = self._request(
             "POST",
             f"{self.instagram_user_id}/media",

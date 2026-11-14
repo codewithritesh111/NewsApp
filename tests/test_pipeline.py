@@ -5,7 +5,7 @@ import struct
 import tempfile
 import unittest
 import wave
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,77 +20,56 @@ from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
 from app.intelligence.news_researcher import NEWS_CATEGORIES, build_news_and_post_plan_prompt
 from app.pipeline import (
-    POSTING_COOLDOWN,
     _generate_background,
     _get_event_summary,
-    _prepare_description,
-    _posting_cooldown_rejection_reason,
     _publish_gate_rejection_reason,
-    _validate_generated_plan_structure,
-    _validate_research_result,
+    _validate_generated_plan,
     run_pipeline,
 )
 
 
 def _approve_test_plan(plan: dict) -> dict:
+    event_time = datetime.now(timezone.utc).isoformat()
     plan["research_metrics"] = {
-        "candidate_count": 5,
-        "unique_candidate_count": 5,
+        "candidate_count": 25,
+        "unique_candidate_count": 18,
     }
+    plan["selected_story"]["actual_event_at"] = event_time
     plan["publish_assessment"] = {
         "eligible": True,
-        "cooldown_exception": "NONE",
-        "cooldown_exception_evidence": "",
+        "india_wide_relevance": "VERY_HIGH",
+        "public_interest": "VERY_HIGH",
+        "public_attention": "VERY_HIGH",
+        "recency": "VERY_HIGH",
+        "significance": "VERY_HIGH",
+        "uniqueness": "VERY_HIGH",
+        "thought_provoking": True,
+        "emotional_resonance": "VERY_HIGH",
+        "human_stakes": "A verified development has meaningful effects on families across India.",
+        "india_wide_impact_evidence": "Official data confirms the policy applies nationwide.",
+        "emotional_resonance_evidence": "The confirmed outcome gives affected families reason for hope.",
+        "actual_event_at": event_time,
+        "significant_new_development": False,
+        "new_development_summary": "",
         "reason": "A verified, high-impact development affects a broad audience.",
     }
     return plan
 
 
 class TrendPipelineTests(unittest.TestCase):
-    def test_news_prompt_is_compact_and_covers_candidate_and_publish_rules(self):
+    def test_news_prompt_requires_category_shortlist_then_global_comparison(self):
         prompt = build_news_and_post_plan_prompt()
-        cooldown_prompt = build_news_and_post_plan_prompt(posting_cooldown_active=True)
-        history = [f"Published story {index}: Distinct event {index}" for index in range(15)]
-        prompt_with_history = build_news_and_post_plan_prompt(history)
 
-        self.assertIn("5 latest", prompt)
-        self.assertIn("last 5 hours", prompt)
-        self.assertIn("occurrence time, not article time", prompt)
-        self.assertIn("all 15 latest posted stories", prompt)
-        self.assertIn("compare candidates with all 15", prompt.lower())
-        self.assertIn("shared distinctive name/keyword", prompt.lower())
-        self.assertIn("avoid repeat queries", prompt.lower())
-        self.assertIn("stop at 5 unique candidates", prompt.lower())
-        self.assertIn("cooldown_exception: one string from", prompt.lower())
-        self.assertIn("never nest them", prompt.lower())
-        self.assertIn("no candidate list", prompt.lower())
-        self.assertIn("No Reel was posted within 3 hours", prompt)
-        self.assertIn("A Reel was posted within 3 hours", cooldown_prompt)
-        self.assertIn("UNUSUAL_NUMBERS", prompt)
-        self.assertNotIn("see description for more detail", prompt.lower())
-        self.assertIn("bright, vivid, colorful", prompt.lower())
-        self.assertIn("no text, lettering, signage", prompt.lower())
-        self.assertLess(len(prompt), 2700)
-        for item in history:
-            self.assertIn(item, prompt_with_history)
+        self.assertIn("evaluate each supported category", prompt)
+        self.assertIn("single strongest candidate as that category's finalist", prompt)
+        self.assertIn("compare all category finalists", prompt)
+        self.assertIn("highest-ranked available story", prompt)
+        self.assertIn("this ranking does not mean it qualifies for publication", prompt.lower())
+        self.assertIn("are all very_high", prompt.lower())
+        self.assertIn("india_wide_relevance", prompt.lower())
+        self.assertIn("emotional_resonance", prompt.lower())
         for category in NEWS_CATEGORIES:
             self.assertIn(f'"{category}"', prompt)
-            self.assertEqual(prompt.count(f'"{category}"'), 1)
-
-    def test_research_result_requires_integer_candidate_counts(self):
-        result = _approve_test_plan(
-            {
-                "selected_story": {
-                    "title": "A current India news story",
-                    "event_summary": "A current India news story affects local residents",
-                },
-            }
-        )
-        result["research_metrics"]["candidate_count"] = "five"
-        result["publish_assessment"]["eligible"] = False
-
-        with self.assertRaisesRegex(ValueError, "integer candidate counts"):
-            _validate_research_result(result)
 
     def test_multiple_credentials_are_parsed_and_cloudflare_pairs_stay_aligned(self):
         with patch.dict(
@@ -194,12 +173,9 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertEqual(_get_event_summary(story), story["event_summary"])
 
     def test_event_summary_falls_back_to_selected_story_title(self):
-        story = {"title": "CRPF Injured"}
+        story = {"title": "CRPF Injured in Kulgam Attack"}
 
         self.assertEqual(_get_event_summary(story), story["title"])
-
-    def test_event_summary_accepts_any_non_empty_summary(self):
-        self.assertEqual(_get_event_summary({"event_summary": "One word"}), "One word")
 
     def test_nonbreaking_hyphens_are_normalized_before_rendering(self):
         self.assertEqual(
@@ -255,114 +231,163 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertEqual(result, plan)
             self.assertEqual(json.loads(raw_output.read_text(encoding="utf-8")), plan)
 
-    def test_groq_client_moves_nested_reel_plan_fields_to_top_level(self):
-        plan = {
-            "selected_story": {
-                "title": "A current India story",
-                "category": "Other",
-                "headline": "The update",
-                "image_body": "A concise image story.",
-                "background_image_prompt": "A bright editorial illustration.",
-                "description": "A factual update.",
-                "hashtags": ["#IndiaNews"],
-                "sources": [{"url": "https://news.example/story"}],
-            },
-        }
-        client = CloudAIResearcher(
-            "groq",
-            ["test-key"],
-            "openai/gpt-oss-20b",
-            plan_validator=_validate_generated_plan_structure,
-        )
-        response = {"choices": [{"message": {"content": json.dumps(plan)}}]}
-
-        with patch.object(client, "_post", return_value=response):
-            result = client.research_and_generate_plan("Return a plan")
-
-        self.assertEqual(result["category"], "Other")
-        self.assertEqual(result["headline"], "The update")
-        self.assertEqual(result["sources"], [{"url": "https://news.example/story"}])
-        self.assertEqual(result["selected_story"], {"title": "A current India story"})
-
-    def test_groq_plan_does_not_retry_invalid_response_with_another_key(self):
+    def test_groq_plan_retries_invalid_response_with_next_key(self):
+        plan = {"selected_story": {"title": "A current India story"}, "slides": [{"headline": "Update"}]}
         client = CloudAIResearcher("groq", ["first-key", "second-key"], "openai/gpt-oss-20b")
-        response = {"choices": [{"message": {"content": "not valid JSON"}}]}
+        responses = [
+            {"choices": [{"message": {"content": "not valid JSON"}}]},
+            {"choices": [{"message": {"content": json.dumps(plan)}}]},
+        ]
         keys_seen = []
 
         def fake_post(_payload, api_key):
             keys_seen.append(api_key)
-            return response
+            return responses.pop(0)
 
         with patch.object(client, "_post", side_effect=fake_post):
-            with self.assertRaisesRegex(AIProviderError, "did not return JSON"):
-                client.research_and_generate_plan("Return a plan")
+            result = client.research_and_generate_plan("Return a plan")
 
-        self.assertEqual(keys_seen, ["first-key"])
+        self.assertEqual(result, plan)
+        self.assertEqual(keys_seen, ["first-key", "second-key"])
 
-    def test_groq_plan_validation_does_not_retry_with_another_key(self):
+    def test_groq_plan_validation_retries_only_the_plan_request(self):
+        valid_plan = {
+            "selected_story": {
+                "title": "A verified current news development",
+                "event_summary": "A verified current news development affects local residents",
+            },
+            "category": "Technology",
+            "headline": "A Verified Current News Update",
+            "image_body": (
+                "The latest verified update changes the way affected people access this service, "
+                "with officials confirming the main decision today. The next steps will determine "
+                "how quickly people and businesses feel its practical impact across India."
+            ),
+            "background_image_prompt": "A clean editorial illustration with clear space for text.",
+            "description": "A useful, factual description of the current news.",
+            "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
+            "sources": [{"url": "https://news.example/story"}],
+        }
         client = CloudAIResearcher(
             "groq",
             ["first-key", "second-key"],
             "openai/gpt-oss-20b",
-            plan_validator=_validate_generated_plan_structure,
+            plan_validator=_validate_generated_plan,
         )
-        content = json.dumps({"slides": []})
-        response = {"choices": [{"message": {"content": content}}]}
+        responses = [
+            {"choices": [{"message": {"content": json.dumps({"slides": []})}}]},
+            {"choices": [{"message": {"content": json.dumps(valid_plan)}}]},
+        ]
         keys_seen = []
 
         def fake_post(_payload, api_key):
             keys_seen.append(api_key)
-            return response
+            return responses.pop(0)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            raw_output = Path(temp_dir) / "groq_response.txt"
-            with patch.object(client, "_post", side_effect=fake_post):
-                with self.assertRaisesRegex(
-                    AIProviderError,
-                    "invalid response structure: Groq Reel plan must include a selected_story object",
-                ):
-                    client.research_and_generate_plan("Return a plan", raw_output_path=raw_output)
+        with patch.object(client, "_post", side_effect=fake_post):
+            result = client.research_and_generate_plan("Return a plan")
 
-            self.assertEqual(raw_output.read_text(encoding="utf-8"), content)
+        self.assertEqual(result, valid_plan)
+        self.assertEqual(keys_seen, ["first-key", "second-key"])
 
-        self.assertEqual(keys_seen, ["first-key"])
-
-    def test_plan_structure_leaves_content_rules_to_groq(self):
+    def test_plan_validator_enforces_category_description_and_sources(self):
         plan = {
             "selected_story": {
                 "title": "A verified current news development",
-                "event_summary": "Brief",
+                "event_summary": "A verified current news development affects local residents",
             },
-            "category": "Unsupported but still a string",
+            "category": "Technology",
             "headline": "A verified current news update",
-            "image_body": "Too short",
+            "image_body": (
+                "The latest verified update changes the way affected people access this service, "
+                "with officials confirming the main decision today. The next steps will determine "
+                "how quickly people and businesses feel its practical impact across India."
+            ),
             "background_image_prompt": "A relevant editorial illustration.",
-            "description": "news " * 501,
-            "hashtags": ["#news", "#news", "not a valid hashtag"],
-            "sources": [],
+            "description": "A factual news description.",
+            "hashtags": ["#CurrentStory", "#IndiaUpdate", "#PublicInterest", "#LatestNews", "#NewsExplained"],
+            "sources": [{"url": "https://news.example/story"}],
         }
 
-        _validate_generated_plan_structure(plan)
-        self.assertEqual(
-            _prepare_description(plan),
-            f"{plan['description'].strip()}\n\n{' '.join(plan['hashtags'])}",
+        with self.assertRaisesRegex(ValueError, "supported news categories"):
+            plan["category"] = "Public interest"
+            _validate_generated_plan(plan)
+
+        plan["category"] = "Technology"
+        _validate_generated_plan(plan)
+
+        plan["description"] = "news " * 501
+        with self.assertRaisesRegex(ValueError, "500 words"):
+            _validate_generated_plan(plan)
+
+        plan["description"] = "A factual news description."
+        plan["sources"] = []
+        with self.assertRaisesRegex(ValueError, "at least one source"):
+            _validate_generated_plan(plan)
+
+    def test_plan_validator_requires_five_to_fifteen_unique_valid_hashtags(self):
+        plan = {
+            "selected_story": {
+                "title": "A verified current news development",
+                "event_summary": "A verified current news development affects local residents",
+            },
+            "category": "Technology",
+            "headline": "A verified current news update",
+            "image_body": (
+                "The latest verified update changes the way affected people access this service, "
+                "with officials confirming the main decision today. The next steps will determine "
+                "how quickly people and businesses feel its practical impact across India."
+            ),
+            "background_image_prompt": "A relevant editorial illustration.",
+            "description": "A factual news description.",
+            "hashtags": ["#News", "#India", "#Technology", "#Update"],
+            "sources": [{"url": "https://news.example/story"}],
+        }
+        with self.assertRaisesRegex(ValueError, "5 to 15 relevant hashtags"):
+            _validate_generated_plan(plan)
+
+        plan["hashtags"].append("#PublicInterest")
+        _validate_generated_plan(plan)
+
+        plan["hashtags"][-1] = "#news"
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            _validate_generated_plan(plan)
+
+        plan["hashtags"][-1] = "#Hashtag With Spaces"
+        with self.assertRaisesRegex(ValueError, "single valid hashtag"):
+            _validate_generated_plan(plan)
+
+    def test_plan_validator_rejects_repeated_main_keywords_from_history(self):
+        plan = {
+            "selected_story": {
+                "title": "ISRO successfully test fires GSLV rocket engine",
+                "event_summary": "ISRO tests GSLV rocket engine ahead of NVS 04 launch",
+            },
+            "category": "Technology",
+            "headline": "ISRO Tests GSLV Engine",
+            "image_body": (
+                "ISRO successfully completed a ground test of the GSLV rocket engine, "
+                "an important step toward preparing the launch vehicle for the upcoming "
+                "navigation satellite mission and its planned launch schedule."
+            ),
+            "background_image_prompt": "A rocket engine editorial illustration.",
+            "description": "A factual update. Like, share and follow",
+            "hashtags": ["#ISRO", "#GSLV", "#Rocket", "#Space", "#India"],
+            "sources": [{"url": "https://news.example/story"}],
+        }
+
+        with self.assertRaisesRegex(ValueError, "overlapping main keywords"):
+            _validate_generated_plan(
+                plan,
+                ["ISRO test fires GSLV rocket engine ahead of NVS 04 launch"],
+            )
+
+        _validate_generated_plan(
+            plan,
+            ["ISRO announces a new Chandrayaan lunar science instrument"],
         )
 
-    def test_plan_structure_still_rejects_malformed_types(self):
-        plan = {
-            "selected_story": {"title": "A current India story"},
-            "category": "Other",
-            "headline": "Headline",
-            "image_body": "Body",
-            "background_image_prompt": "Prompt",
-            "description": "Description",
-            "hashtags": ["#India", 5],
-        }
-
-        with self.assertRaisesRegex(ValueError, "hashtags must be a list of strings"):
-            _validate_generated_plan_structure(plan)
-
-    def test_publish_gate_uses_candidate_eligibility_without_extra_ratings(self):
+    def test_publish_gate_requires_exceptional_ratings_and_fresh_actual_event(self):
         result = _approve_test_plan(
             {
                 "selected_story": {
@@ -371,99 +396,44 @@ class TrendPipelineTests(unittest.TestCase):
                 },
             }
         )
-        self.assertIsNone(_publish_gate_rejection_reason(result))
-        self.assertNotIn("actual_event_at", result["publish_assessment"])
+        self.assertIsNone(_publish_gate_rejection_reason(result, []))
 
-    def test_publish_gate_leaves_duplicate_screening_to_groq(self):
-        result = _approve_test_plan(
-            {
-                "selected_story": {
-                    "title": "ISRO tests GSLV engine before NVS launch",
-                    "event_summary": "ISRO test fires GSLV rocket engine ahead of NVS launch",
-                },
-            }
-        )
-        self.assertIsNone(_publish_gate_rejection_reason(result))
-
-    def test_posting_cooldown_requires_wait_unless_story_meets_an_exception(self):
-        now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
-        last_posted_at = datetime(2026, 11, 13, 11, 0, tzinfo=timezone.utc)
-        assessment = {
-            "cooldown_exception": "NONE",
-            "cooldown_exception_evidence": "",
-        }
-
+        result["publish_assessment"]["public_interest"] = "HIGH"
         self.assertIn(
-            "last 3 hours",
-            _posting_cooldown_rejection_reason(assessment, last_posted_at, now),
-        )
-        self.assertIsNone(
-            _posting_cooldown_rejection_reason(assessment, last_posted_at, now + POSTING_COOLDOWN)
+            "Public interest assessment is below the publishing threshold.",
+            _publish_gate_rejection_reason(result, []),
         )
 
-        assessment["cooldown_exception"] = "SAD_EVENT"
-        assessment["cooldown_exception_evidence"] = "Verified major disaster with significant loss of life."
-        self.assertIsNone(
-            _posting_cooldown_rejection_reason(assessment, last_posted_at, now)
+        result["publish_assessment"]["public_interest"] = "VERY_HIGH"
+        result["publish_assessment"]["india_wide_relevance"] = "HIGH"
+        self.assertIn(
+            "India wide relevance assessment is below the publishing threshold.",
+            _publish_gate_rejection_reason(result, []),
         )
-
-    def test_pipeline_skips_recurring_story_during_posting_cooldown(self):
-        result = _approve_test_plan(
-            {
-                "selected_story": {
-                    "title": "A recurring weekly public update",
-                    "event_summary": "Officials issue a regular weekly public update",
-                },
-            }
+        result["publish_assessment"]["india_wide_relevance"] = "VERY_HIGH"
+        result["publish_assessment"]["emotional_resonance"] = "HIGH"
+        self.assertIn(
+            "Emotional resonance assessment is below the publishing threshold.",
+            _publish_gate_rejection_reason(result, []),
         )
-        result["publish_assessment"]["eligible"] = False
-        result["publish_assessment"]["reason"] = "This routine weekly update can wait."
-
-        class FakeAI:
-            def research_and_generate_plan(self, _prompt, _max_tokens, raw_output_path):
-                raw_output_path.write_text(json.dumps(result), encoding="utf-8")
-                return result
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir)
-            headlines_path = output_dir / "shortlisted_headlines.json"
-            headlines_path.write_text(
-                json.dumps(["An unrelated previous headline"]),
-                encoding="utf-8",
-            )
-            history_path = output_dir / "posting_history.json"
-            history_path.write_text(
-                json.dumps(
-                    {
-                        "last_posted_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                ),
-                encoding="utf-8",
-            )
-            fake_settings = SimpleNamespace(
-                output_dir=output_dir,
-                groq_model="openai/gpt-oss-20b",
-            )
-            with (
-                patch("app.pipeline.settings", fake_settings),
-                patch("app.pipeline.SHORTLISTED_HEADLINES_PATH", headlines_path),
-                patch("app.pipeline.POSTING_HISTORY_PATH", history_path),
-                patch("app.pipeline._make_ai_client", return_value=FakeAI()),
-                patch("app.pipeline._generate_background") as generate_background,
-            ):
-                run_dir = run_pipeline(require_publish_configuration=True)
-
-            summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
-            self.assertEqual(summary["status"], "skipped_posting_cooldown")
-            self.assertIn("last 3 hours", summary["skip_reason"])
-            self.assertFalse((run_dir / "post_plan.json").exists())
-            generate_background.assert_not_called()
+        result["publish_assessment"]["emotional_resonance"] = "VERY_HIGH"
+        result["publish_assessment"]["thought_provoking"] = False
+        self.assertIn(
+            "thought-provoking angle",
+            _publish_gate_rejection_reason(result, []),
+        )
+        result["publish_assessment"]["thought_provoking"] = True
+        result["publish_assessment"]["actual_event_at"] = "2020-01-01T00:00:00Z"
+        self.assertIn(
+            "older than 24 hours",
+            _publish_gate_rejection_reason(result, []),
+        )
 
     def test_rejected_publish_gate_skips_all_media_and_returns_success_summary(self):
         result = {
             "research_metrics": {
-                "candidate_count": 5,
-                "unique_candidate_count": 5,
+                "candidate_count": 12,
+                "unique_candidate_count": 9,
             },
             "selected_story": {
                 "title": "A routine corporate product announcement",
@@ -485,10 +455,6 @@ class TrendPipelineTests(unittest.TestCase):
                 "actual_event_at": datetime.now(timezone.utc).isoformat(),
                 "significant_new_development": False,
                 "new_development_summary": "",
-                "event_frequency": "UNKNOWN",
-                "frequency_evidence": "",
-                "cooldown_exception": "NONE",
-                "cooldown_exception_evidence": "",
                 "reason": "The announcement has limited public impact.",
             },
         }
@@ -520,8 +486,8 @@ class TrendPipelineTests(unittest.TestCase):
             summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["status"], "skipped_publish_gate")
             self.assertEqual(summary["publish_decision"], "REJECTED")
-            self.assertEqual(summary["research_metrics"]["candidate_count"], 5)
-            self.assertEqual(summary["research_metrics"]["unique_candidate_count"], 5)
+            self.assertEqual(summary["research_metrics"]["candidate_count"], 12)
+            self.assertEqual(summary["research_metrics"]["unique_candidate_count"], 9)
             self.assertFalse((run_dir / "post_plan.json").exists())
             self.assertFalse((run_dir / "caption.txt").exists())
             self.assertEqual(json.loads(headlines_path.read_text(encoding="utf-8")), previous_summaries)
@@ -529,7 +495,7 @@ class TrendPipelineTests(unittest.TestCase):
             compose_image.assert_not_called()
             create_reel.assert_not_called()
 
-    def test_cloudflare_image_does_not_retry_with_another_credential(self):
+    def test_cloudflare_image_retries_only_the_failed_generation(self):
         pool = RotatingCredentialPool(
             [("first-account", "first-token"), ("second-account", "second-token")],
             "Cloudflare",
@@ -542,30 +508,19 @@ class TrendPipelineTests(unittest.TestCase):
                 credentials_seen.append((account_id, api_token))
 
             def generate(self, _prompt, path):
-                raise AIProviderError("temporary failure")
+                if len(credentials_seen) == 1:
+                    raise AIProviderError("temporary failure")
+                return path
 
         with patch("app.pipeline.CloudflareImageGenerator", FakeGenerator):
-            with self.assertRaisesRegex(AIProviderError, "selected round-robin credential"):
-                _generate_background("illustration", output_path, pool, "test-model")
+            result = _generate_background("illustration", output_path, pool, "test-model")
+
+        self.assertEqual(result, output_path)
         self.assertEqual(
             credentials_seen,
-            [("first-account", "first-token")],
+            [("first-account", "first-token"), ("second-account", "second-token")],
         )
-        self.assertEqual(pool.next_credential(), ("second-account", "second-token"))
-
-    def test_round_robin_credential_index_persists_between_pool_instances(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state_path = Path(temp_dir) / "credential_rotation.json"
-            credentials = ("first-key", "second-key", "third-key")
-            first_pool = RotatingCredentialPool(credentials, "Groq", state_path)
-            second_pool = RotatingCredentialPool(credentials, "Groq", state_path)
-
-            self.assertEqual(first_pool.next_credential(), "first-key")
-            self.assertEqual(second_pool.next_credential(), "second-key")
-            self.assertEqual(
-                json.loads(state_path.read_text(encoding="utf-8")),
-                {"groq": 2},
-            )
+        self.assertEqual(next(pool.attempts()), ("first-account", "first-token"))
 
     def test_failed_cloudflare_generation_does_not_update_shortlisted_headlines(self):
         plan = {
@@ -573,7 +528,7 @@ class TrendPipelineTests(unittest.TestCase):
                 "title": "A current India story",
                 "event_summary": "A current India development affects local residents",
             },
-            "category": "Other",
+            "category": "Technology",
             "headline": "A Current India Story",
             "image_body": (
                 "The latest verified update changes the way affected people access this service, "
@@ -603,7 +558,6 @@ class TrendPipelineTests(unittest.TestCase):
             output_dir = Path(temp_dir)
             headlines_path = output_dir / "shortlisted_headlines.json"
             headlines_path.write_text(json.dumps(previous_summaries), encoding="utf-8")
-            rotation_path = output_dir / "credential_rotation.json"
             fake_settings = SimpleNamespace(
                 output_dir=output_dir,
                 groq_model="openai/gpt-oss-20b",
@@ -618,11 +572,10 @@ class TrendPipelineTests(unittest.TestCase):
             with (
                 patch("app.pipeline.settings", fake_settings),
                 patch("app.pipeline.SHORTLISTED_HEADLINES_PATH", headlines_path),
-                patch("app.pipeline.CREDENTIAL_ROTATION_PATH", rotation_path),
                 patch("app.pipeline._make_ai_client", return_value=FakeAI()),
                 patch("app.pipeline.CloudflareImageGenerator", FailedImageGenerator),
             ):
-                with self.assertRaisesRegex(AIProviderError, "selected round-robin credential"):
+                with self.assertRaisesRegex(AIProviderError, "all 1 configured"):
                     run_pipeline()
 
             self.assertEqual(
@@ -630,15 +583,15 @@ class TrendPipelineTests(unittest.TestCase):
                 previous_summaries,
             )
 
-    def test_groq_client_retries_http_error_with_the_next_key(self):
+    def test_groq_client_fails_over_after_cloudflare_524_timeout(self):
         plan = {"selected_story": {"title": "A current India story"}, "slides": [{"headline": "Update"}]}
         client = CloudAIResearcher(
             "groq",
             ["first-key", "second-key"],
             "openai/gpt-oss-20b",
         )
-        server_error = SimpleNamespace(
-            status_code=503,
+        timeout_response = SimpleNamespace(
+            status_code=524,
             ok=False,
         )
         success_response = SimpleNamespace(
@@ -651,7 +604,7 @@ class TrendPipelineTests(unittest.TestCase):
 
         with patch(
             "app.intelligence.cloud_ai_client.requests.post",
-            side_effect=[server_error, success_response],
+            side_effect=[timeout_response, success_response],
         ) as post:
             result = client.research_and_generate_plan("Return a plan")
 
@@ -664,185 +617,6 @@ class TrendPipelineTests(unittest.TestCase):
             ],
             ["Bearer first-key", "Bearer second-key"],
         )
-
-    def test_groq_client_does_not_retry_when_publish_checks_reject_story(self):
-        rejected_plan = {
-            "research_metrics": {
-                "candidate_count": 5,
-                "unique_candidate_count": 5,
-            },
-            "selected_story": {
-                "title": "A current story that fails publishing checks",
-            },
-            "publish_assessment": {
-                "eligible": False,
-                "reason": "The selected story does not meet the publishing checks.",
-                "cooldown_exception": "NONE",
-                "cooldown_exception_evidence": "",
-            },
-        }
-        client = CloudAIResearcher(
-            "groq",
-            ["first-key", "second-key"],
-            "openai/gpt-oss-20b",
-            plan_validator=_validate_research_result,
-        )
-        response = SimpleNamespace(
-            status_code=200,
-            ok=True,
-            json=lambda: {
-                "choices": [
-                    {"message": {"content": json.dumps(rejected_plan)}},
-                ],
-            },
-        )
-
-        with patch(
-            "app.intelligence.cloud_ai_client.requests.post",
-            return_value=response,
-        ) as post:
-            result = client.research_and_generate_plan("Return a plan")
-
-        self.assertEqual(result, rejected_plan)
-        self.assertEqual(post.call_count, 1)
-
-    def test_groq_client_rotates_on_next_request_after_non_http_error(self):
-        plan = {"selected_story": {"title": "A current India story"}, "slides": [{"headline": "Update"}]}
-        client = CloudAIResearcher(
-            "groq",
-            ["first-key", "second-key"],
-            "openai/gpt-oss-20b",
-        )
-        empty_response = SimpleNamespace(
-            status_code=200,
-            ok=True,
-            json=lambda: {"choices": [{"message": {"content": ""}}]},
-        )
-        success_response = SimpleNamespace(
-            status_code=200,
-            ok=True,
-            json=lambda: {
-                "choices": [{"message": {"content": json.dumps(plan)}}],
-            },
-        )
-
-        with patch(
-            "app.intelligence.cloud_ai_client.requests.post",
-            side_effect=[empty_response, success_response],
-        ) as post:
-            with self.assertRaisesRegex(AIProviderError, "empty message content"):
-                client.research_and_generate_plan("Return a plan")
-            result = client.research_and_generate_plan("Return a plan")
-
-        self.assertEqual(result, plan)
-        self.assertEqual(post.call_count, 2)
-        self.assertEqual(
-            [
-                call.kwargs["headers"]["Authorization"]
-                for call in post.call_args_list
-            ],
-            ["Bearer first-key", "Bearer second-key"],
-        )
-
-    def test_groq_empty_content_logs_safe_metadata_without_retrying(self):
-        response_data = {
-            "id": "request-123",
-            "model": "openai/gpt-oss-20b",
-            "choices": [
-                {
-                    "finish_reason": "tool_calls",
-                    "message": {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "type": "function",
-                                "function": {
-                                    "name": "browser_search",
-                                    "arguments": "{}",
-                                },
-                            },
-                        ],
-                    },
-                },
-            ],
-            "usage": {
-                "prompt_tokens": 123,
-                "completion_tokens": 0,
-                "total_tokens": 123,
-            },
-        }
-        client = CloudAIResearcher(
-            "groq",
-            ["first-key", "second-key"],
-            "openai/gpt-oss-20b",
-        )
-        keys_seen = []
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            raw_output = Path(temp_dir) / "groq_response.txt"
-
-            def fake_post(_payload, api_key):
-                keys_seen.append(api_key)
-                return response_data
-
-            with self.assertLogs("app.intelligence.cloud_ai_client", level="INFO") as captured:
-                with patch.object(client, "_post", side_effect=fake_post):
-                    with self.assertRaisesRegex(AIProviderError, "empty message content"):
-                        client.research_and_generate_plan(
-                            "Return a plan",
-                            raw_output_path=raw_output,
-                        )
-
-            metadata = json.loads(
-                raw_output.with_name("groq_response_metadata.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            log_output = "\n".join(captured.output)
-
-            self.assertFalse(raw_output.exists())
-            self.assertEqual(metadata["configured_key_count"], 2)
-            self.assertEqual(metadata["attempt"], 1)
-            self.assertEqual(metadata["choices"][0]["finish_reason"], "tool_calls")
-            self.assertEqual(metadata["choices"][0]["content_type"], "null")
-            self.assertEqual(metadata["choices"][0]["tool_names"], ["browser_search"])
-            self.assertEqual(metadata["usage"]["completion_tokens"], 0)
-            self.assertIn("Request attempt 1/2", log_output)
-            self.assertIn("key rotation only retries HTTP status errors", log_output)
-            self.assertNotIn("first-key", log_output)
-            self.assertNotIn("second-key", log_output)
-            self.assertEqual(keys_seen, ["first-key"])
-
-    def test_groq_payload_includes_reasoning_effort_and_handles_length_finish_reason(self):
-        client = CloudAIResearcher(
-            "groq",
-            ["test-key"],
-            "openai/gpt-oss-20b",
-            reasoning_effort="low",
-        )
-        payloads_seen = []
-
-        def fake_post(payload, _api_key):
-            payloads_seen.append(payload)
-            return {
-                "choices": [
-                    {
-                        "finish_reason": "length",
-                        "message": {"content": ""},
-                    }
-                ]
-            }
-
-        with patch.object(client, "_post", side_effect=fake_post):
-            with self.assertRaisesRegex(
-                AIProviderError,
-                r"empty message content \(finish_reason='length'\)",
-            ):
-                client.research_and_generate_plan("Return a plan", 9000)
-
-        self.assertEqual(payloads_seen[0]["reasoning_effort"], "low")
-        self.assertEqual(payloads_seen[0]["max_completion_tokens"], 9000)
 
     def test_groq_429_error_explains_quota_and_credential_configuration(self):
         client = CloudAIResearcher(
@@ -858,7 +632,7 @@ class TrendPipelineTests(unittest.TestCase):
         ) as post:
             with self.assertRaisesRegex(
                 AIProviderError,
-                r"HTTP 429.*trying all 2 configured credentials.*GROQ_API_KEYS.*share quota",
+                r"HTTP 429.*rate limit or exhausted quota.*GROQ_API_KEYS.*share quota",
             ):
                 client.research_and_generate_plan("Return a plan")
 
@@ -878,7 +652,7 @@ class TrendPipelineTests(unittest.TestCase):
         ) as post:
             with self.assertRaisesRegex(
                 AIProviderError,
-                r"HTTP 401.*trying all 2 configured credentials.*GROQ_API_KEYS.*restart the app",
+                r"HTTP 401.*Groq rejected the API key.*GROQ_API_KEYS.*restart the app",
             ):
                 client.research_and_generate_plan("Return a plan")
 
@@ -1032,7 +806,7 @@ class TrendPipelineTests(unittest.TestCase):
                 "url": "https://news.example/lead",
             },
             "headline": "A Current India Story",
-            "category": "Other",
+            "category": "Technology",
             "image_body": (
                 "The latest verified update changes the way affected people access this service, "
                 "with officials confirming the main decision today. The next steps will determine "
@@ -1063,11 +837,9 @@ class TrendPipelineTests(unittest.TestCase):
                 for index in range(15)
             ]
             headlines_path.write_text(json.dumps(previous_summaries), encoding="utf-8")
-            rotation_path = output_dir / "credential_rotation.json"
             with (
                 patch("app.pipeline.settings", fake_settings),
                 patch("app.pipeline.SHORTLISTED_HEADLINES_PATH", headlines_path),
-                patch("app.pipeline.CREDENTIAL_ROTATION_PATH", rotation_path),
                 patch("app.pipeline._make_ai_client", return_value=FakeAI()),
                 patch("app.pipeline.CloudflareImageGenerator", FakeImageGenerator),
                 patch("app.pipeline.compose_news_image", side_effect=capture_image),
@@ -1077,7 +849,7 @@ class TrendPipelineTests(unittest.TestCase):
 
             summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["selection_method"], "groq_browser_search")
-            self.assertEqual(summary["category"], "Other")
+            self.assertEqual(summary["category"], "Technology")
             self.assertEqual(Path(summary["bgm_file"]).name, "Other.m4a")
             self.assertEqual(summary["public_video_url"], None)
             self.assertTrue((Path(summary["post_directory"]) / "news_image.jpg").is_file())
@@ -1086,15 +858,21 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertFalse((run_dir / "candidates.json").exists())
             prompt, max_tokens = requests_seen[0]
             self.assertEqual(max_tokens, 9000)
-            self.assertIn("browser_search", prompt.lower())
-            self.assertIn("5 latest", prompt.lower())
-            self.assertIn("rank by recency", prompt.lower())
-            self.assertIn("compare candidates with all 15", prompt.lower())
-            self.assertIn("no reel was posted within 3 hours", prompt.lower())
+            self.assertIn("browser search", prompt.lower())
+            self.assertIn("return exactly one selected story", prompt.lower())
+            self.assertIn("do not force a category", prompt.lower())
+            self.assertIn("compare several candidates", prompt.lower())
+            self.assertIn("same underlying news event", prompt.lower())
+            self.assertIn("5-15 word", prompt.lower())
+            self.assertIn("latest credible, high-impact", prompt.lower())
+            self.assertIn("geopolitics and diplomacy", prompt.lower())
             self.assertIn("500 words", prompt.lower())
-            self.assertNotIn("see description for more detail", prompt.lower())
-            self.assertIn("all 15 latest posted stories", prompt.lower())
-            self.assertIn("5-15 unique", prompt.lower())
+            self.assertIn("see description for more detail", prompt.lower())
+            self.assertIn("latest 15 published-story summaries", prompt.lower())
+            self.assertIn("compare distinctive people, organizations", prompt.lower())
+            self.assertIn("within the last 24 hours", prompt.lower())
+            self.assertIn("audience interest is the highest priority", prompt.lower())
+            self.assertIn("5-15 unique, relevant hashtags", prompt.lower())
             self.assertIn(previous_summaries[0], prompt)
             generated_post_plan = json.loads(
                 (Path(summary["post_directory"]) / "post_plan.json").read_text(encoding="utf-8")
@@ -1129,10 +907,6 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertEqual(
                 select_bgm_track("Defence", bgm_dir).name,
                 "Other.m4a",
-            )
-            self.assertEqual(
-                select_bgm_track("Disaster", bgm_dir).name,
-                "Major Sad Event.mp3",
             )
 
     def test_bgm_selection_requires_other_when_category_has_no_track(self):
@@ -1196,8 +970,6 @@ class TrendPipelineTests(unittest.TestCase):
 
             with Image.open(output) as image:
                 self.assertEqual(image.size, (1080, 1920))
-                self.assertGreater(sum(image.getpixel((1000, 200))), sum((70, 90, 110)))
-                self.assertLess(image.getpixel((100, 1580))[0], image.getpixel((100, 1580))[1])
 
 
 if __name__ == "__main__":

@@ -173,14 +173,12 @@ def compose_news_image(
     height: int = 1920,
 ):
     image = _cover_crop(Image.open(background_path), width, height)
-    image = ImageEnhance.Color(image).enhance(1.5)
-    image = ImageEnhance.Contrast(image).enhance(1.05)
-    image = ImageEnhance.Brightness(image).enhance(1.2)
+    image = ImageEnhance.Brightness(image).enhance(0.55)
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
     for y in range(height):
         progress = y / height
-        alpha = int(2 + 28 * progress**1.7)
+        alpha = int(25 + 155 * progress**1.7)
         overlay_draw.line((0, y, width, y), fill=(4, 10, 22, alpha))
     image = Image.alpha_composite(image.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(image)
@@ -188,6 +186,7 @@ def compose_news_image(
     margin = 78
     headline_font = _font(76, True)
     body_font = _font(38, False)
+    callout_font = _font(33, True)
     footer_font = _font(31, True)
     max_text_width = width - 2 * margin
 
@@ -238,7 +237,7 @@ def compose_news_image(
     panel_draw.rounded_rectangle(
         (32, content_top - 28, width - 32, panel_bottom),
         radius=30,
-        fill=(5, 10, 20, 125),
+        fill=(5, 10, 20, 190),
     )
     image = Image.alpha_composite(image, panel)
     draw = ImageDraw.Draw(image)
@@ -258,6 +257,25 @@ def compose_news_image(
     for line in body_lines:
         draw.text((margin, y), line, font=body_font, fill=(238, 242, 247, 255))
         y += body_line_height
+
+    callout_text = "SEE DESCRIPTION FOR MORE DETAIL"
+    callout_lines = _wrap_by_pixels(draw, callout_text, callout_font, max_text_width - 36)
+    callout_y = height - 370
+    callout_height = 34 + len(callout_lines) * 44
+    draw.rounded_rectangle(
+        (margin, callout_y, width - margin, callout_y + callout_height),
+        radius=22,
+        fill=(210, 38, 48, 248),
+    )
+    for line_index, line in enumerate(callout_lines):
+        bbox = draw.textbbox((0, 0), line, font=callout_font)
+        text_x = (width - (bbox[2] - bbox[0])) // 2
+        draw.text(
+            (text_x, callout_y + 16 + line_index * 44),
+            line,
+            font=callout_font,
+            fill="white",
+        )
 
     footer_y = height - 210
     footer_text = "LIKE, SHARE AND FOLLOW"

@@ -1,22 +1,13 @@
 import argparse
 import json
 import logging
-import re
 from pathlib import Path
 
 from app.config import settings
 from app.intelligence.credential_pool import AIProviderError
-from app.pipeline import _record_successful_instagram_post, run_pipeline
+from app.pipeline import run_pipeline
 from app.social.cloudinary_storage import CloudinaryUploadError
 from app.social.instagram import InstagramPublisher, InstagramPublishingError
-
-INSTAGRAM_ADDITIONAL_HASHTAGS = (
-    "#reels",
-    "#reelsinstagram",
-    "#explorepage",
-    "#trending",
-    "#viral",
-)
 
 
 def _require_instagram_settings() -> None:
@@ -37,23 +28,6 @@ def _save_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _append_instagram_hashtags(description: str) -> str:
-    existing_hashtags = {
-        match.group(0).casefold()
-        for match in re.finditer(r"(?<!\w)#[\w]+", description, flags=re.UNICODE)
-    }
-    missing_hashtags = [
-        hashtag
-        for hashtag in INSTAGRAM_ADDITIONAL_HASHTAGS
-        if hashtag.casefold() not in existing_hashtags
-    ]
-    if not missing_hashtags:
-        return description
-    caption = description.rstrip()
-    hashtags = " ".join(missing_hashtags)
-    return f"{caption}\n\n{hashtags}" if caption else hashtags
-
-
 def _publish_reel(
     publisher: InstagramPublisher,
     video_url: str,
@@ -61,10 +35,8 @@ def _publish_reel(
     summary: dict,
     summary_path: Path,
 ) -> str:
-    description = _append_instagram_hashtags(description)
     media_id = publisher.publish_reel(video_url, description)
     summary["instagram_media_id"] = media_id
-    summary["instagram_published_at"] = _record_successful_instagram_post()
     summary["instagram_publishing"] = "PUBLISHED"
     _save_json(summary_path, summary)
     return media_id
