@@ -1142,22 +1142,33 @@ class TrendPipelineTests(unittest.TestCase):
         base_result["publish_assessment"]["reason"] = "Routine event during cooldown."
         self.assertIn("Routine event during cooldown", _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True))
 
-    def test_bgm_track_aliasing_and_mapping(self):
-        # Direct matches
-        self.assertEqual(select_bgm_track("Crime").name, "Crime.mp3")
-        self.assertEqual(select_bgm_track("Politics").name, "Politics.mp3")
-        self.assertEqual(select_bgm_track("Business").name, "Business.mp3")
-        self.assertEqual(select_bgm_track("Geopolitics").name, "Geopolitics.mp3")
+    def test_bgm_track_round_robin_and_mapping(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "bgm_rotation.json"
 
-        # Aliases
-        self.assertEqual(select_bgm_track("Disaster").name, "Major Sad Event.mp3")
-        self.assertEqual(select_bgm_track("EmergencyReporting").name, "Major Sad Event.mp3")
-        self.assertEqual(select_bgm_track("Trends").name, "Social trends.mp3")
+            # Category with 3 tracks (Politics: Division.mp3, Symmetry.mp3, The Complex.mp3)
+            # Cycles round-robin:
+            t1 = select_bgm_track("Politics", rotation_state_path=state_path)
+            t2 = select_bgm_track("Politics", rotation_state_path=state_path)
+            t3 = select_bgm_track("Politics", rotation_state_path=state_path)
+            t4 = select_bgm_track("Politics", rotation_state_path=state_path)
 
-        # Fallback to Other
-        self.assertEqual(select_bgm_track("Other").name, "Other.m4a")
-        self.assertEqual(select_bgm_track("BreakingNews").name, "Other.m4a")
-        self.assertEqual(select_bgm_track("Achievement").name, "Other.m4a")
+            self.assertEqual(t1.name, "Division.mp3")
+            self.assertEqual(t2.name, "Symmetry.mp3")
+            self.assertEqual(t3.name, "The Complex.mp3")
+            self.assertEqual(t4.name, "Division.mp3")
+
+            # BreakingNews (News Theme.mp3, Stormfront.mp3, Volatile Reaction.mp3)
+            b1 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
+            b2 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
+            self.assertEqual(b1.name, "News Theme.mp3")
+            self.assertEqual(b2.name, "Stormfront.mp3")
+
+            # Other remains unchanged as Other.m4a
+            self.assertEqual(select_bgm_track("Other", rotation_state_path=state_path).name, "Other.m4a")
+
+            # Unknown category falls back to Other.m4a
+            self.assertEqual(select_bgm_track("UnknownCat", rotation_state_path=state_path).name, "Other.m4a")
 
     def test_news_prompt_with_cooldown_active_enforces_exception_rules(self):
         prompt = build_news_and_post_plan_prompt(posting_cooldown_active=True)

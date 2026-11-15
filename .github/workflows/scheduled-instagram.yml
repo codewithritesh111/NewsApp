@@ -59,10 +59,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add shortlisted_headlines.json posting_history.json credential_rotation.json
+          git add shortlisted_headlines.json posting_history.json credential_rotation.json bgm_rotation.json
           if git diff --staged --quiet; then
             echo "No state updates to persist."
             exit 0
           fi
-          git commit -m "Update story history, posting timestamp, and credential rotation state"
+          git commit -m "Update story history, posting timestamp, and rotation state"
           git push

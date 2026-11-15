@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,7 @@ REEL_FRAME_RATE = 30
 REEL_WIDTH = 1080
 REEL_HEIGHT = 1920
 BGM_DIRECTORY = Path(__file__).resolve().parents[2] / "BGM"
+BGM_ROTATION_PATH = Path(__file__).resolve().parents[2] / "bgm_rotation.json"
 SUPPORTED_AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 
 
@@ -23,37 +25,120 @@ def _category_key(value: str) -> str:
     return value.casefold().replace(" ", "")
 
 
-def select_bgm_track(category: str, bgm_dir: Path = BGM_DIRECTORY) -> Path:
-    if not bgm_dir.is_dir():
-        raise FileNotFoundError(f"Background music directory not found: {bgm_dir}")
+def _read_bgm_rotation_state(state_path: Path) -> dict[str, int]:
+    if not state_path.is_file():
+        return {}
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return {
+                    str(k).lower(): int(v)
+                    for k, v in data.items()
+                    if isinstance(v, (int, float))
+                }
+    except Exception:
+        pass
+    return {}
 
-    tracks = sorted(
+
+def _write_bgm_rotation_state(state_path: Path, state: dict[str, int]) -> None:
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = state_path.with_suffix(".tmp")
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        temp_file.replace(state_path)
+    except Exception:
+        pass
+
+
+def get_category_bgm_tracks(category: str, bgm_dir: Path = BGM_DIRECTORY) -> list[Path]:
+    """Finds all audio tracks matching a category (directory or files)."""
+    if not bgm_dir.is_dir():
+        return []
+
+    cat_key = _category_key(category)
+
+    # 1. Look for a category subdirectory (e.g. BGM/BreakingNews)
+    for entry in sorted(bgm_dir.iterdir()):
+        if entry.is_dir() and _category_key(entry.name) == cat_key:
+            tracks = sorted(
+                (
+                    track
+                    for track in entry.iterdir()
+                    if track.is_file() and track.suffix.casefold() in SUPPORTED_AUDIO_EXTENSIONS
+                ),
+                key=lambda track: track.name.casefold(),
+            )
+            if tracks:
+                return tracks
+
+    # 2. Look for matching flat files in bgm_dir (e.g. Crime.mp3 or Crime_1.mp3)
+    flat_tracks = sorted(
         (
             track
             for track in bgm_dir.iterdir()
-            if track.is_file() and track.suffix.casefold() in SUPPORTED_AUDIO_EXTENSIONS
+            if track.is_file()
+            and track.suffix.casefold() in SUPPORTED_AUDIO_EXTENSIONS
+            and _category_key(track.stem).startswith(cat_key)
         ),
-        key=lambda track: (track.suffix.casefold(), track.name.casefold()),
+        key=lambda track: track.name.casefold(),
     )
-    matching_key = _category_key(category)
-    for track in tracks:
-        if _category_key(track.stem) == matching_key:
-            return track
+    if flat_tracks:
+        return flat_tracks
 
-    aliased = CATEGORY_BGM_ALIASES.get(matching_key)
-    if aliased:
-        aliased_key = _category_key(aliased)
-        for track in tracks:
-            if _category_key(track.stem) == aliased_key:
-                return track
+    return []
 
-    for track in tracks:
-        if _category_key(track.stem) == "other":
-            return track
-    raise FileNotFoundError(
-        f"No BGM track matches category {category!r}, and no Other fallback track "
-        f"was found in {bgm_dir}."
-    )
+
+def select_bgm_track(
+    category: str,
+    bgm_dir: Path = BGM_DIRECTORY,
+    rotation_state_path: Path | None = None,
+) -> Path:
+    if not bgm_dir.is_dir():
+        raise FileNotFoundError(f"Background music directory not found: {bgm_dir}")
+
+    cat_key = _category_key(category)
+    candidates = get_category_bgm_tracks(category, bgm_dir)
+
+    # Check aliases if no direct candidates
+    if not candidates:
+        aliased = CATEGORY_BGM_ALIASES.get(cat_key)
+        if aliased:
+            candidates = get_category_bgm_tracks(aliased, bgm_dir)
+
+    # Fallback to 'other'
+    if not candidates:
+        candidates = get_category_bgm_tracks("other", bgm_dir)
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"No BGM track matches category {category!r}, and no Other fallback track "
+            f"was found in {bgm_dir}."
+        )
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Determine effective state path for round-robin rotation
+    effective_state_path = rotation_state_path
+    if effective_state_path is None:
+        try:
+            if bgm_dir.resolve() == BGM_DIRECTORY.resolve():
+                effective_state_path = BGM_ROTATION_PATH
+        except Exception:
+            pass
+
+    if effective_state_path:
+        state = _read_bgm_rotation_state(effective_state_path)
+        idx = state.get(cat_key, 0)
+        selected_track = candidates[idx % len(candidates)]
+        state[cat_key] = (idx + 1) % len(candidates)
+        _write_bgm_rotation_state(effective_state_path, state)
+        return selected_track
+
+    return candidates[0]
 
 
 def create_static_reel(image_path: Path, output_path: Path, audio_path: Path) -> Path:
@@ -113,20 +198,8 @@ def create_static_reel(image_path: Path, output_path: Path, audio_path: Path) ->
         "+faststart",
         str(output_path.resolve()),
     ]
-    try:
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"Could not encode the 15-second Reel with BGM: {exc}") from exc
-    if result.returncode:
-        details = (result.stderr or "").strip().splitlines()
-        error = details[-1] if details else f"ffmpeg exited with code {result.returncode}"
-        raise RuntimeError(f"Could not encode the 15-second Reel with BGM: {error}")
-    if not output_path.is_file() or output_path.stat().st_size == 0:
-        raise RuntimeError("The Reel encoder did not produce a non-empty MP4.")
+
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg Reel encoding failed:\n{result.stderr}")
     return output_path

@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 SHORTLISTED_HEADLINES_PATH = Path(__file__).resolve().parents[1] / "shortlisted_headlines.json"
 POSTING_HISTORY_PATH = Path(__file__).resolve().parents[1] / "posting_history.json"
 CREDENTIAL_ROTATION_PATH = Path(__file__).resolve().parents[1] / "credential_rotation.json"
+BGM_ROTATION_PATH = Path(__file__).resolve().parents[1] / "bgm_rotation.json"
 COOLDOWN_HOURS = 3.0
 MAX_SHORTLISTED_HEADLINES = 15
 INSTAGRAM_CAPTION_LIMIT = 2200
@@ -729,7 +730,7 @@ def run_pipeline(
             REEL_WIDTH,
             REEL_HEIGHT,
         )
-        bgm_path = select_bgm_track(plan["category"])
+        bgm_path = select_bgm_track(plan["category"], rotation_state_path=BGM_ROTATION_PATH)
         create_static_reel(image_path, reel_path, bgm_path)
         generated = 1
         public_video_url = _upload_reel_if_configured(
