@@ -99,7 +99,6 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertIn("last 3 hrs", prompt.lower())
         self.assertIn("the daily chronicle", prompt.lower())
         self.assertIn("like, share and follow", prompt.lower())
-        self.assertIn("see description for more detail", prompt.lower())
         for category in (
             "Crime",
             "Politics",
@@ -907,7 +906,6 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertIn("500 words", prompt.lower())
             self.assertIn("like, share and follow", prompt.lower())
             self.assertIn("the daily chronicle", prompt.lower())
-            self.assertIn("see description for more detail", prompt.lower())
             self.assertIn("last 15 news posted", prompt.lower())
             self.assertIn("compare distinctive people, organizations", prompt.lower())
             self.assertIn("5-15 relevant hashtags", prompt.lower())

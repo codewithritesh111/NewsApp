@@ -1,17 +1,24 @@
+import re
 from datetime import datetime, timedelta, timezone
 
 NEWS_CATEGORIES = (
+    "ShockingCrime",
+    "NaturalDisaster",
+    "MajorAchievement",
+    "BreakingNews",
+    "CelebritySports",
+    "ScienceTech",
+    "Unusual",
+    "Business",
+    "Trends",
+    "EmergencyReporting",
+    "Other",
+    # Backward-compatible categories
     "Crime",
     "Politics",
     "Geopolitics",
     "Disaster",
     "Achievement",
-    "BreakingNews",
-    "Business",
-    "Trends",
-    "EmergencyReporting",
-    "Other",
-    # Legacy categories kept for backwards compatibility
     "Government schemes",
     "Social trends",
     "Major Sad Event",
@@ -33,6 +40,89 @@ COOLDOWN_EXCEPTIONS = (
     "MAJOR_CHANGE",
 )
 
+APPROVED_NEWS_CHANNELS = (
+    "Aaj Tak",
+    "NDTV",
+    "ABP News",
+    "India Today TV",
+    "Times Now",
+    "CNN-News18",
+    "Republic TV",
+    "Zee News",
+    "India TV",
+    "News18 India",
+    "DD News",
+    "TV9 Bharatvarsh",
+    "News24",
+    "Times Now Navbharat",
+    "WION",
+)
+
+CHANNEL_ALIASES: dict[str, str] = {
+    "aaj tak": "Aaj Tak",
+    "aajtak": "Aaj Tak",
+    "aaj tak hd": "Aaj Tak",
+    "ndtv": "NDTV",
+    "ndtv 24x7": "NDTV",
+    "ndtv india": "NDTV",
+    "ndtv profit": "NDTV",
+    "abp": "ABP News",
+    "abp news": "ABP News",
+    "abp live": "ABP News",
+    "abp ananda": "ABP News",
+    "india today": "India Today TV",
+    "india today tv": "India Today TV",
+    "indiatoday": "India Today TV",
+    "times now": "Times Now",
+    "timesnow": "Times Now",
+    "times now world": "Times Now",
+    "cnn-news18": "CNN-News18",
+    "cnn news18": "CNN-News18",
+    "news18": "CNN-News18",
+    "news 18": "CNN-News18",
+    "republic": "Republic TV",
+    "republic tv": "Republic TV",
+    "republic bharat": "Republic TV",
+    "republic world": "Republic TV",
+    "zee": "Zee News",
+    "zee news": "Zee News",
+    "zee bharat": "Zee News",
+    "zeenews": "Zee News",
+    "india tv": "India TV",
+    "indiatv": "India TV",
+    "indiatv news": "India TV",
+    "news18 india": "News18 India",
+    "dd news": "DD News",
+    "doordarshan": "DD News",
+    "doordarshan news": "DD News",
+    "tv9": "TV9 Bharatvarsh",
+    "tv9 bharatvarsh": "TV9 Bharatvarsh",
+    "tv9 bharat": "TV9 Bharatvarsh",
+    "news24": "News24",
+    "news 24": "News24",
+    "times now navbharat": "Times Now Navbharat",
+    "times now navbharat hd": "Times Now Navbharat",
+    "wion": "WION",
+    "wion news": "WION",
+}
+
+
+def match_approved_channel(name: str) -> str | None:
+    """Normalize and match a channel name against the 15 approved Indian news channels."""
+    if not name or not isinstance(name, str):
+        return None
+    cleaned = name.strip().lower()
+    cleaned_simple = re.sub(r"\.(?:com|in|org|net)\b", "", cleaned)
+    cleaned_simple = re.sub(r"\b(?:online|live|digital|english|hindi|hd|news|tv)\b", "", cleaned_simple).strip()
+    if cleaned in CHANNEL_ALIASES:
+        return CHANNEL_ALIASES[cleaned]
+    if cleaned_simple in CHANNEL_ALIASES:
+        return CHANNEL_ALIASES[cleaned_simple]
+    for alias, canonical in CHANNEL_ALIASES.items():
+        if alias in cleaned or alias in cleaned_simple:
+            return canonical
+    return None
+
 
 def build_news_and_post_plan_prompt(
     previous_summaries: list[str] | None = None,
@@ -46,74 +136,68 @@ def build_news_and_post_plan_prompt(
     else:
         recent_summaries_text = "- None yet."
 
-    allowed_topics = (
-        '"Crime", "Politics", "Geopolitics", "Disaster", "Achievement", '
-        '"BreakingNews", "Business", "Trends", "EmergencyReporting", "Other"'
+    categories_list = (
+        "ShockingCrime, NaturalDisaster, MajorAchievement, BreakingNews, "
+        "CelebritySports, ScienceTech, Unusual, Business, Trends, EmergencyReporting, "
+        "Crime, Politics, Geopolitics, Disaster, Achievement, Other"
     )
 
     if posting_cooldown_active:
-        cooldown_instructions = """POSTING COOLDOWN STATUS: ACTIVE (at least one post/reel was published within the last 3 hours).
-CRITICAL COOLDOWN PUBLISHING RULES:
-Since a post/reel was published in the last 3 hours, the pipeline is in cooldown.
-- ABSOLUTE EXCLUSIONS: Do NOT publish any small crime (e.g. local theft, isolated robbery, minor fraud, local arrest), small local event, minor incident, or routine/regular event (daily/monthly/yearly occurrences). All small crimes and minor incidents MUST BE REJECTED during cooldown.
-- STRICT COOLDOWN EXCEPTION: Publish ONLY if the candidate is genuinely very important, such as a major BreakingNews event, has verified nationwide impact across India, is a major Disaster, or a major historical Achievement:
-    * BREAKING_NEWS: Very important breaking news event of urgent national concern.
-    * NATIONWIDE_IMPACT: Verified nationwide impact affecting people or policy across India.
-    * DISASTER: Major natural or human disaster, major tragedy, or national emergency.
-    * MAJOR_ACHIEVEMENT: Big historical or national achievement / major breakthrough.
-    * RARE_EVENT: A greater event that occurs once in a long while.
-    * UNUSUAL_NUMBERS: Involves big, unusual, or shocking numbers.
-    * MAJOR_CHANGE: Big systemic changes took place (landmark law, major constitutional ruling).
-- If the candidate meets these strict criteria, set eligible to true, nationwide_impact to true, is_minor_or_local_incident to false, and set cooldown_exception to the matching code.
-- Rule 3: If the candidate is a small crime, small event, minor incident, or lacks nationwide importance, set eligible to false, is_minor_or_local_incident to true, cooldown_exception to "NONE", and explain the rejection reason."""
+        cooldown_instructions = (
+            "POSTING COOLDOWN STATUS: ACTIVE (at least one post/reel published in last 3 hrs).\n"
+            "- Reject small crime, minor incident, or routine events.\n"
+            "- Approve ONLY major BreakingNews, national disasters, or historical achievements.\n"
+            "- Set cooldown_exception to matching code (BREAKING_NEWS, NATIONWIDE_IMPACT, DISASTER, MAJOR_ACHIEVEMENT, etc.) or NONE."
+        )
     else:
-        cooldown_instructions = """POSTING COOLDOWN STATUS: INACTIVE (no post/reel through this pipeline was published in the last 3 hours).
-Publishing Rules:
-- Rule 1: If no post/reel through this pipeline is published in last 3 hrs, approve and publish the post/reel (set eligible to true, cooldown_exception to "NONE", and is_minor_or_local_incident to false).
-- If no credible candidate exists or all candidates are duplicates, set eligible to false and explain why."""
+        cooldown_instructions = (
+            "POSTING COOLDOWN STATUS: INACTIVE (no post/reel published in last 3 hrs).\n"
+            "- Approve high-impact news (eligible: true, cooldown_exception: 'NONE', is_minor_or_local_incident: false)."
+        )
+
+    channels_list = "\n".join(f"  {idx}. {ch}" for idx, ch in enumerate(APPROVED_NEWS_CHANNELS, 1))
 
     return f"""The current date and time in India is {current_time}.
 
 Follow this exact process to research and shortlist news for The Daily Chronicle Instagram channel:
 
 1. COLLECT CANDIDATES (TOKEN-EFFICIENT SEARCH):
-- Execute ONLY 1 or 2 focused browser search queries (e.g. `browser_search('latest breaking trending news India')`).
-- Inspect the top search result snippets directly. Do NOT make repetitive multi-category searches and do NOT fetch full web pages.
-- Collect exactly 5 latest, trending, impactful, attention-drawing Indian news stories from topics like Crime, Politics, Geopolitics, Disaster, Achievement, BreakingNews, Business, Trends, EmergencyReporting. These 5 stories are your candidates.
+- Execute ONLY 1 focused browser search query (e.g. `browser_search('latest breaking trending news India NDTV India Today Aaj Tak Times Now')`).
+- Inspect the top search snippets directly. Do NOT make repetitive searches and do NOT fetch full web pages.
+- Collect exactly 5 latest, trending, impactful, attention-drawing Indian news stories.
+- STRICT 5-HOUR RECENCY LIMIT (STRICTLY <= 5 HOURS OLD):
+  * The candidate to select MUST NOT be older than 5 hours strictly from the current time ({current_time}).
+  * Check the timestamp or relative time in search snippets (e.g. '1 hour ago', '2 hours ago', '3 hours ago', '4 hours ago').
+  * STRICTLY REJECT any story published more than 5 hours ago or from earlier days. The news must be fresh breaking news from the past 5 hours.
+- SELECTION CRITERIA (18-35 YEARS AGE FOCUS):
+  * Target audience is 18-35 years old (Gen-Z and young Millennials) on Instagram. The news must be latest, trending, high-impact, and captivating.
+  * Categories: {categories_list}.
 
-2. DEDUPLICATION & SHORTLISTING:
-- Critical requirement: strictly ensure the selected candidate is NOT logically similar to any of the last 15 news posted below. Posting duplicate or logically similar stories is strictly prohibited. Compare distinctive people, organizations, places, event names, and actions even if worded differently.
+2. DEDUPLICATION & 3-CHANNEL SHORTLISTING:
+- STRICT REPETITION RESTRICTION: The selected story must strictly avoid repetition. Never select any story logically similar to the last 15 news posted below. Compare distinctive people, organizations, places, event names, and core actions even if worded differently:
 Last 15 news posted:
 {recent_summaries_text}
 
-- From the eligible candidates that pass deduplication, select the single best candidate (the Shortlisted Candidate).
+- MANDATORY 3-CHANNEL VERIFICATION MANDATE:
+  From your candidates, select the single best candidate story (the Shortlisted Candidate) that was published within the last 5 hours AND LOGICALLY HAS BEEN PUBLISHED by AT LEAST 3 distinct channels from this approved list of 15 popular Indian news channels (i.e. the same underlying event is verified and reported by at least 3 of these channels, even if headline wording differs):
+{channels_list}
+  Verify coverage for your single shortlisted candidate only (run at most 1 quick search if needed, e.g. `browser_search('<event keywords> Aaj Tak NDTV Times Now')`).
+  Do NOT perform multiple searches for other candidates. Ensure your single shortlisted candidate is confirmed across at least 3 approved channels from this exact list.
+  MEDIA SOURCING PREFERENCE: First check if a news broadcast video clip is available (set video_url if found); if no video is found, set video_url to null and provide an image_search_query.
 
 3. PUBLISH GATE DECISION:
 {cooldown_instructions}
 
 4. OUTPUT FORMAT:
-If the reel is finalized to be posted (eligible is true):
-- category: Classify the news into exactly one of [{allowed_topics}].
-- headline: Specific, punchy headline understandable without context, 5-10 words.
-- image_body: 25-45 words describing what happened, key verified specifics, and why the audience should care.
-- background_image_prompt: Create a plan of the image to be generated for the post. The generated image MUST be bright, vibrant, and eye-catching with a good, attractive, and colorful background directly relevant to this news story so people's interest will increase. Use bright cinematic lighting, rich colors, and clear visual depth. The image plan should NOT have any image type label in the image, and must NOT be a fixed format—it must be flexible for the app to overlay: Name of news channel (The Daily Chronicle), headline, content, and "Like, Share and Follow" wherever suits. Do NOT ask for text, lettering, words, logos, or watermarks in the background image. Do NOT add "See description for more detail" in the plan or image.
-- description: An engaging explanation of the news (max 500 words) for the Instagram caption. Must include "Like, share and follow" exactly once.
-- hashtags: 5-15 relevant hashtags starting with #.
-- selected_story: factual title, 5-15 word event_summary, url, and source.
-- sources: list of source articles.
-
-If eligible is false:
-- Return research_metrics, selected_story (the best candidate or null), and publish_assessment with eligible: false and reason. Do not generate headline, image_body, background_image_prompt, description, or hashtags.
-
-Return ONLY one valid JSON object (no markdown, no backticks, no extra text):
+Return ONLY one valid JSON object with 5-15 relevant hashtags (no markdown, no extra text):
 {{
   "research_metrics": {{"candidate_count": 5, "unique_candidate_count": 5}},
   "selected_story": {{
-    "title": "Title of shortlisted candidate",
+    "title": "Shortlisted candidate title",
     "event_summary": "5-15 word factual summary of the event",
-    "published_at": "...",
+    "published_at": "ISO timestamp or relative time (e.g. '2 hours ago') proving it is <= 5 hours old",
     "url": "https://...",
-    "source": "Publisher Name"
+    "source": "Channel Name"
   }},
   "publish_assessment": {{
     "eligible": true,
@@ -124,10 +208,21 @@ Return ONLY one valid JSON object (no markdown, no backticks, no extra text):
     "reason": "Clear explanation of the publishing decision"
   }},
   "category": "BreakingNews",
-  "headline": "Punchy Specific News Headline",
-  "image_body": "25 to 45 words explaining what happened, confirmed facts, and why the audience should care about this news development.",
-  "background_image_prompt": "A bright, vibrant, and visually striking editorial illustration with an attractive, colorful background relevant to this news story, bright cinematic lighting, high clarity, and clean negative space flexible for text overlays. No text or logos.",
-  "description": "Engaging description explaining the story and context. Like, share and follow.",
-  "hashtags": ["#News", "#India", "#BreakingNews", "#LatestUpdates", "#CurrentAffairs"],
-  "sources": [{{"name": "Publisher", "title": "Article Title", "url": "https://..."}}]
+  "verified_channels": ["Aaj Tak", "NDTV", "India Today TV"],
+  "headline": "Specific punchy headline, 5-10 words",
+  "image_body": "10-25 words — single punchy line explaining what happened and why it matters.",
+  "image_url": null,
+  "video_url": null,
+  "image_search_query": "Specific 3-5 word query for real camera-captured ground photo",
+  "layout": {{
+    "text_position": "top",
+    "highlight_words": ["WORD1", "WORD2"]
+  }},
+  "description": "Engaging description (<500 words) for Instagram caption. Must include 'Like, share and follow' exactly once.",
+  "hashtags": ["#News", "#India", "#BreakingNews", "#Trending", "#CurrentAffairs"],
+  "sources": [
+    {{"name": "Aaj Tak", "title": "Article Title 1", "url": "https://..."}},
+    {{"name": "NDTV", "title": "Article Title 2", "url": "https://..."}},
+    {{"name": "India Today TV", "title": "Article Title 3", "url": "https://..."}}
+  ]
 }}"""

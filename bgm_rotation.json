@@ -1,9 +1,11 @@
 {
   "disaster": 1,
-  "breakingnews": 1,
+  "breakingnews": 0,
   "business": 1,
   "geopolitics": 1,
   "politics": 0,
   "achievement": 0,
-  "crime": 2
+  "crime": 2,
+  "naturaldisaster": 2,
+  "shockingcrime": 2
 }
