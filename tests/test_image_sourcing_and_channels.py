@@ -249,6 +249,19 @@ class TestChannelVerificationAndImageSourcing(unittest.TestCase):
             _validate_story_recency(old_story)
         self.assertIn("older than 5 hours strictly", str(ctx.exception))
 
+    def test_find_story_recency_issue_detects_old_web_date(self):
+        from app.pipeline import _find_story_recency_issue
+
+        # When skip_web=True, declared fresh passes
+        fresh_story = {"title": "Fresh Breaking News", "published_at": "1 hour ago"}
+        self.assertIsNone(_find_story_recency_issue(fresh_story, skip_web=True))
+
+        # Declared old fails immediately
+        old_story = {"title": "Old Story", "published_at": "12 hours ago"}
+        issue = _find_story_recency_issue(old_story, skip_web=True)
+        self.assertIsNotNone(issue)
+        self.assertIn("12 hours ago", issue)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -129,7 +129,9 @@ def build_news_and_post_plan_prompt(
     posting_cooldown_active: bool = False,
 ) -> str:
     india_timezone = timezone(timedelta(hours=5, minutes=30), name="IST")
-    current_time = datetime.now(india_timezone).strftime("%A, %d %B %Y %H:%M IST")
+    now_ist = datetime.now(india_timezone)
+    current_time = now_ist.strftime("%A, %d %B %Y %H:%M IST")
+    today_str = now_ist.strftime("%d %B %Y")
     recent_summaries = (previous_summaries or [])[-15:]
     if recent_summaries:
         recent_summaries_text = "\n".join(f"- {summary}" for summary in recent_summaries)
@@ -162,13 +164,15 @@ def build_news_and_post_plan_prompt(
 Follow this exact process to research and shortlist news for The Daily Chronicle Instagram channel:
 
 1. COLLECT CANDIDATES (TOKEN-EFFICIENT SEARCH):
-- Execute ONLY 1 focused browser search query (e.g. `browser_search('latest breaking trending news India NDTV India Today Aaj Tak Times Now')`).
+- Execute ONLY 1 focused browser search query targeting today's date: `browser_search('India breaking news live updates {today_str} Aaj Tak NDTV India Today Times Now')`.
 - Inspect the top search snippets directly. Do NOT make repetitive searches and do NOT fetch full web pages.
 - Collect exactly 5 latest, trending, impactful, attention-drawing Indian news stories.
 - STRICT 5-HOUR RECENCY LIMIT (STRICTLY <= 5 HOURS OLD):
   * The candidate to select MUST NOT be older than 5 hours strictly from the current time ({current_time}).
   * Check the timestamp or relative time in search snippets (e.g. '1 hour ago', '2 hours ago', '3 hours ago', '4 hours ago').
-  * STRICTLY REJECT any story published more than 5 hours ago or from earlier days. The news must be fresh breaking news from the past 5 hours.
+  * STRICTLY REJECT any story published more than 5 hours ago or from earlier days/months/years.
+  * ZERO TOLERANCE FOR OLD NEWS: Do NOT select past controversies, old scandals, or past chargesheets (e.g. past NEET paper leak cases, past elections, old events).
+  * You MUST extract the genuine article URL and real publication time from the search result. Do NOT fabricate or invent timestamps.
 - SELECTION CRITERIA (18-35 YEARS AGE FOCUS):
   * Target audience is 18-35 years old (Gen-Z and young Millennials) on Instagram. The news must be latest, trending, high-impact, and captivating.
   * Categories: {categories_list}.
@@ -181,7 +185,7 @@ Last 15 news posted:
 - MANDATORY 3-CHANNEL VERIFICATION MANDATE:
   From your candidates, select the single best candidate story (the Shortlisted Candidate) that was published within the last 5 hours AND LOGICALLY HAS BEEN PUBLISHED by AT LEAST 3 distinct channels from this approved list of 15 popular Indian news channels (i.e. the same underlying event is verified and reported by at least 3 of these channels, even if headline wording differs):
 {channels_list}
-  Verify coverage for your single shortlisted candidate only (run at most 1 quick search if needed, e.g. `browser_search('<event keywords> Aaj Tak NDTV Times Now')`).
+  Verify coverage for your single shortlisted candidate only (run at most 1 quick search if needed, e.g. `browser_search('<event keywords> {today_str} Aaj Tak NDTV Times Now')`).
   Do NOT perform multiple searches for other candidates. Ensure your single shortlisted candidate is confirmed across at least 3 approved channels from this exact list.
   MEDIA SOURCING PREFERENCE: First check if a news broadcast video clip is available (set video_url if found); if no video is found, set video_url to null and provide an image_search_query.
 

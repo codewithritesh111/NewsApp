@@ -6,6 +6,8 @@ import tempfile
 import unittest
 import wave
 from datetime import datetime, timedelta, timezone
+
+os.environ["SKIP_WEB_RECENCY_CHECK"] = "1"
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch

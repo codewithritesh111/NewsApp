@@ -88,6 +88,88 @@ def _validate_story_recency(story: dict, max_hours: float = MAX_CANDIDATE_AGE_HO
                 f"Selected news candidate is older than {MAX_CANDIDATE_AGE_HOURS:.0f} hours strictly. "
                 f"Published: {pub_str} (~{age_hours:.1f} hours ago)."
             )
+
+
+def _find_story_recency_issue(story: dict | None, skip_web: bool = False) -> str | None:
+    """Check declared timestamp and cross-check real web coverage to detect hallucinated old stories."""
+    if not story or not isinstance(story, dict):
+        return None
+    pub_str = story.get("published_at")
+    now = datetime.now(IST)
+    if pub_str and isinstance(pub_str, str) and pub_str.strip():
+        pub_dt = parse_publication_time(pub_str, now)
+        if pub_dt is not None:
+            age_hours = (now - pub_dt).total_seconds() / 3600.0
+            if age_hours > MAX_CANDIDATE_AGE_HOURS_WITH_SKEW:
+                return f"Declared published_at '{pub_str}' is ~{age_hours:.1f} hours old (> 5h limit)"
+
+    if skip_web or os.getenv("SKIP_WEB_RECENCY_CHECK") == "1":
+        return None
+
+    # Live web cross-check
+    title = story.get("title", "")
+    claimed_url = story.get("url")
+    if not title:
+        return None
+
+    urls_to_check: list[str] = []
+    if claimed_url and isinstance(claimed_url, str) and claimed_url.startswith("http"):
+        urls_to_check.append(claimed_url.strip())
+
+    try:
+        from urllib.parse import quote_plus
+        import requests
+
+        clean_title = re.sub(r"[^\w\s]", " ", title).strip()
+        words = clean_title.split()
+        search_q = " ".join(words[:6]) if len(words) > 6 else clean_title
+        search_url = f"https://www.bing.com/news/search?q={quote_plus(search_q)}"
+        resp = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if resp.ok:
+            links = re.findall(r'<a[^>]+href=[\x27\x22](https?://[^\x27\x22]+)[\x27\x22]', resp.text)
+            for link in links:
+                l_low = link.lower()
+                if "bing.com" not in l_low and "microsoft.com" not in l_low and "msn.com" not in l_low:
+                    urls_to_check.append(link)
+    except Exception as exc:
+        log.warning("[RECENCY] Real web cross-check skipped: %s", exc)
+
+    for u in urls_to_check[:4]:
+        # URL date markers like /2026/Aug/07/ or /2024-05-12/
+        m_date = re.search(r"/(20\d\d)[/-]([A-Za-z0-9]{2,3})[/-](\d{1,2})", u)
+        if m_date:
+            y, m, d = m_date.groups()
+            try:
+                import dateutil.parser
+                dt = dateutil.parser.parse(f"{y} {m} {d}").replace(tzinfo=IST)
+                diff_hours = (now - dt).total_seconds() / 3600.0
+                if diff_hours > 24.0:
+                    return f"Web coverage ({u}) shows date {y}-{m}-{d} (~{diff_hours:.0f}h old)"
+            except Exception:
+                pass
+
+        try:
+            r = requests.get(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+            if r.ok:
+                meta = re.findall(
+                    r'<meta[^>]+(?:property|name)=[\x27\x22](?:article:published_time|publish-date|datePublished|pubdate)[\x27\x22][^>]+content=[\x27\x22]([^\x27\x22]+)[\x27\x22]',
+                    r.text,
+                    re.I,
+                )
+                if not meta:
+                    meta = re.findall(r'[\x27\x22]datePublished[\x27\x22]\s*:\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]', r.text)
+                if meta:
+                    import dateutil.parser
+                    dt = dateutil.parser.parse(meta[0])
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=IST)
+                    diff_hours = (now - dt).total_seconds() / 3600.0
+                    if diff_hours > 24.0:
+                        return f"Real article ({u}) datePublished is {meta[0]} (~{diff_hours:.0f}h old)"
+        except Exception:
+            pass
+
+    return None
 GENERIC_STORY_WORDS = {
     "about",
     "after",
@@ -709,32 +791,37 @@ def run_pipeline(
 
         candidate_story = res.get("selected_story")
         overlap = _find_recent_story_overlap(candidate_story, previous_summaries) if candidate_story else None
-        if not overlap:
+        recency_issue = _find_story_recency_issue(candidate_story) if candidate_story else None
+
+        gate_issue = overlap or recency_issue
+        if not gate_issue:
             result = res
             break
 
+        gate_name = "DEDUPLICATION" if overlap else "RECENCY"
         log.warning(
-            "[DEDUPLICATION GATE] Final selected news '%s' is repeated/overlaps with past published news: '%s' (attempt %d/%d).",
+            "[%s GATE] Final selected news '%s' failed validation: %s (attempt %d/%d).",
+            gate_name,
             candidate_story.get("title") if candidate_story else "None",
-            overlap,
+            gate_issue,
             attempt_idx,
             max_research_attempts,
         )
         if attempt_idx < max_research_attempts:
-            log.info("[DEDUPLICATION GATE] Retrying complete browser search process once more...")
+            log.info("[%s GATE] Retrying complete browser search process once more...", gate_name)
         else:
-            log.warning("[DEDUPLICATION GATE] Final selected news is still repeated after retry. Terminating pipeline.")
+            log.warning("[%s GATE] Final selected news is still invalid after retry. Terminating pipeline.", gate_name)
             _write_json(
                 run_dir / "run_summary.json",
                 {
-                    "status": "terminated_repeated_story",
+                    "status": "terminated_repeated_story" if overlap else "terminated_old_story",
                     "run_id": run_id,
                     "execution_started_at_ist": started_at.isoformat(),
                     "ai_provider": "groq",
                     "ai_model": settings.groq_model,
                     "selection_method": "groq_browser_search",
                     "selected_story": candidate_story.get("title") if candidate_story else None,
-                    "termination_reason": f"Final selected news overlaps with past published news: {overlap}",
+                    "termination_reason": f"Final selected news failed gate check: {gate_issue}",
                     "instagram_publishing": "NOT_PUBLISHED",
                 },
             )
