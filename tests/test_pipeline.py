@@ -1158,11 +1158,11 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertEqual(t3.name, "The Complex.mp3")
             self.assertEqual(t4.name, "Division.mp3")
 
-            # BreakingNews (News Theme.mp3, Stormfront.mp3, Volatile Reaction.mp3)
+            # BreakingNews (Dramatic News Pulse.mp3, Epical Drums.mp3, News Theme.mp3, Stormfront.mp3, Volatile Reaction.mp3)
             b1 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
             b2 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
-            self.assertEqual(b1.name, "News Theme.mp3")
-            self.assertEqual(b2.name, "Stormfront.mp3")
+            self.assertEqual(b1.name, "Dramatic News Pulse.mp3")
+            self.assertEqual(b2.name, "Epical Drums.mp3")
 
             # Other remains unchanged as Other.m4a
             self.assertEqual(select_bgm_track("Other", rotation_state_path=state_path).name, "Other.m4a")
