@@ -75,11 +75,13 @@ Publishing Rules:
     return f"""The current date and time in India is {current_time}.
 
 Follow this exact process to research and shortlist news for The Daily Chronicle Instagram channel:
+Your editorial goal: create compelling, shareable reels that viewers forward via DM, save, and watch to completion.
 
-1. COLLECT CANDIDATES (TOKEN-EFFICIENT SEARCH):
+1. COLLECT CANDIDATES (TOKEN-EFFICIENT BROWSER SEARCH):
 - Execute ONLY 1 or 2 focused browser search queries (e.g. `browser_search('latest breaking trending news India')`).
 - Inspect the top search result snippets directly. Do NOT make repetitive multi-category searches and do NOT fetch full web pages.
 - Collect exactly 5 latest, trending, impactful, attention-drawing Indian news stories from topics like Crime, Politics, Geopolitics, Disaster, Achievement, BreakingNews, Business, Trends, EmergencyReporting. These 5 stories are your candidates.
+- Prioritize high-virality, high-shareability stories: shocking numbers, direct impact on daily lives, national pride/achievements, dramatic breaking events, or emotionally resonant developments.
 
 2. DEDUPLICATION & SHORTLISTING:
 - Critical requirement: strictly ensure the selected candidate is NOT logically similar to any of the last 15 news posted below. Posting duplicate or logically similar stories is strictly prohibited. Compare distinctive people, organizations, places, event names, and actions even if worded differently.
@@ -94,13 +96,18 @@ Last 15 news posted:
 4. OUTPUT FORMAT:
 If the reel is finalized to be posted (eligible is true):
 - category: Classify the news into exactly one of [{allowed_topics}].
-- headline: Specific, punchy headline understandable without context, 5-10 words.
-- image_body: 25-45 words describing what happened, key verified specifics, and why the audience should care.
-- background_image_prompt: Create a plan of the image to be generated for the post. The generated image MUST be bright, vibrant, and eye-catching with a good, attractive, and colorful background directly relevant to this news story so people's interest will increase. Use bright cinematic lighting, rich colors, and clear visual depth. The image plan should NOT have any image type label in the image, and must NOT be a fixed format—it must be flexible for the app to overlay: Name of news channel (The Daily Chronicle), headline, content, and "Like, Share and Follow" wherever suits. Do NOT ask for text, lettering, words, logos, or watermarks in the background image. Do NOT add "See description for more detail" in the plan or image.
-- description: An engaging explanation of the news (max 500 words) for the Instagram caption. Must include "Like, share and follow" exactly once.
-- hashtags: 5-15 relevant hashtags starting with #.
+- headline: Specific, punchy headline understandable without context, 5-10 words. Use urgent, dramatic power words where appropriate (e.g. MASSIVE, HISTORIC, BREAKING, RECORD).
+- image_body: 25-45 words describing what happened, key verified specifics, and why the audience should care. Write clearly and engagingly.
+- background_image_prompt: Create a plan of the image to be generated for the post. The generated image MUST be bright, vibrant, and eye-catching with a good, attractive, and colorful background directly relevant to this news story so people's interest will increase. Use bright cinematic lighting, rich colors, and clear visual depth. Describe a specific dramatic, photorealistic scene (e.g., golden hour illumination, volumetric rays, high clarity). The image plan should NOT have any image type label in the image, and must NOT be a fixed format—it must be flexible for the app to overlay: Name of news channel (The Daily Chronicle), headline, content, and "Like, Share and Follow" wherever suits. Do NOT ask for text, lettering, words, logos, or watermarks in the background image. Do NOT add "See description for more detail" in the plan or image.
+- description: An engaging explanation of the news (max 500 words) for the Instagram caption.
+  * Start Line 1 with a compelling hook emoji and punchy sentence that stops users mid-scroll.
+  * Include clear paragraphs explaining the facts, human stakes, and context.
+  * End with a thought-provoking question to spark discussion in the comments (e.g. "What is your take on this? Share your thoughts below 👇").
+  * Must include "Like, share and follow" exactly once.
+- hashtags: 5-15 relevant hashtags starting with # (use targeted, topic-specific tags that categorize the news accurately).
 - selected_story: factual title, 5-15 word event_summary, url, and source.
 - sources: list of source articles.
+- publish_assessment: structured assessment with ratings ("VERY_HIGH" for india_wide_relevance, public_interest, public_attention, recency, significance, uniqueness, emotional_resonance; thought_provoking: true; nationwide_impact: true; is_minor_or_local_incident: false; eligible: true).
 
 If eligible is false:
 - Return research_metrics, selected_story (the best candidate or null), and publish_assessment with eligible: false and reason. Do not generate headline, image_body, background_image_prompt, description, or hashtags.
@@ -111,8 +118,8 @@ Return ONLY one valid JSON object (no markdown, no backticks, no extra text):
   "selected_story": {{
     "title": "Title of shortlisted candidate",
     "event_summary": "5-15 word factual summary of the event",
-    "published_at": "...",
-    "url": "https://...",
+    "published_at": "2026-11-21T06:00:00Z",
+    "url": "https://news.example/story",
     "source": "Publisher Name"
   }},
   "publish_assessment": {{
@@ -121,13 +128,21 @@ Return ONLY one valid JSON object (no markdown, no backticks, no extra text):
     "cooldown_exception": "NONE",
     "nationwide_impact": true,
     "is_minor_or_local_incident": false,
-    "reason": "Clear explanation of the publishing decision"
+    "india_wide_relevance": "VERY_HIGH",
+    "public_interest": "VERY_HIGH",
+    "public_attention": "VERY_HIGH",
+    "recency": "VERY_HIGH",
+    "significance": "VERY_HIGH",
+    "uniqueness": "VERY_HIGH",
+    "emotional_resonance": "VERY_HIGH",
+    "thought_provoking": true,
+    "reason": "Clear explanation of why this high-impact story was chosen for publication"
   }},
   "category": "BreakingNews",
   "headline": "Punchy Specific News Headline",
   "image_body": "25 to 45 words explaining what happened, confirmed facts, and why the audience should care about this news development.",
-  "background_image_prompt": "A bright, vibrant, and visually striking editorial illustration with an attractive, colorful background relevant to this news story, bright cinematic lighting, high clarity, and clean negative space flexible for text overlays. No text or logos.",
-  "description": "Engaging description explaining the story and context. Like, share and follow.",
-  "hashtags": ["#News", "#India", "#BreakingNews", "#LatestUpdates", "#CurrentAffairs"],
+  "background_image_prompt": "A bright, vibrant, and visually striking editorial illustration with an attractive, colorful background directly relevant to this news story, bright cinematic lighting, rich colors, atmospheric depth, and clean negative space flexible for text overlays. No text or logos.",
+  "description": "🚨 Shocking news development that changes everything...\\n\\nDetailed context and confirmed facts about this major development across India.\\n\\nWhat do you think about this move? Let us know in the comments below! 👇\\n\\nLike, share and follow",
+  "hashtags": ["#IndiaNews", "#BreakingNews", "#TopStory", "#CurrentAffairs", "#LatestUpdate"],
   "sources": [{{"name": "Publisher", "title": "Article Title", "url": "https://..."}}]
 }}"""

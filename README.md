@@ -64,16 +64,9 @@ An already-generated Reel with a Cloudinary URL in its `post_plan.json` can be p
 python -m app.main --publish-instagram --post-dir "output\2026-11-12_19-55-26\best_news_a-current-india-story"
 ```
 
-## Half-hourly news monitoring with GitHub Actions
+## Automated news monitoring with GitHub Actions
 
-The workflow at `.github/workflows/scheduled-instagram.yml` runs every 30 minutes from 08:00 through 20:00 IST inclusive. Its UTC cron entries are:
-
-```cron
-30 2-14 * * *
-0 3-14 * * *
-```
-
-Together these run at 02:30 UTC, then every 30 minutes through 14:30 UTC (08:00–20:00 IST). Each run independently researches news; only stories passing the strict gate continue to Reel generation and the existing publishing workflow. A rejected story exits with status 0 and is recorded in `output/<run>/run_summary.json`; `groq_response.txt` contains the structured assessment and the logs include candidate counts, ratings, and the decision. Manual **Run workflow** is still available and follows the same gate.
+The workflow at `.github/workflows/scheduled-instagram.yml` is triggered externally via GitHub Actions dispatch. Each run independently researches trending news; only stories passing the publish gate continue to Reel generation with dynamic Ken Burns motion and Instagram publishing. A rejected story exits with status 0 and is recorded in `output/<run>/run_summary.json`; `groq_response.txt` contains the structured assessment and the logs include candidate counts, ratings, and the decision. Manual **Run workflow** is still available and follows the same gate.
 
 Configure these repository Actions secrets under **Settings → Secrets and variables → Actions**:
 

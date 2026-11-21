@@ -1,4 +1,6 @@
 import json
+import logging
+import random
 import subprocess
 from pathlib import Path
 
@@ -11,6 +13,8 @@ BGM_DIRECTORY = Path(__file__).resolve().parents[2] / "BGM"
 BGM_ROTATION_PATH = Path(__file__).resolve().parents[2] / "bgm_rotation.json"
 SUPPORTED_AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 
+log = logging.getLogger(__name__)
+
 
 CATEGORY_BGM_ALIASES = {
     "disaster": "Major Sad Event",
@@ -19,6 +23,40 @@ CATEGORY_BGM_ALIASES = {
     "achievement": "Other",
     "breakingnews": "Other",
 }
+
+# Ken Burns motion presets — each creates a different subtle pan/zoom animation
+# that keeps the reel visually dynamic and prevents early swipe-aways.
+MOTION_EFFECTS = [
+    {   # Slow zoom in toward center
+        "name": "zoom_in_center",
+        "z": "min(zoom+0.00025,1.2)",
+        "x": "iw/2-(iw/zoom/2)",
+        "y": "ih/2-(ih/zoom/2)",
+    },
+    {   # Start zoomed in, slowly pull back to reveal full scene
+        "name": "zoom_out_center",
+        "z": "if(lte(on,1),1.25,max(zoom-0.00028,1.0))",
+        "x": "iw/2-(iw/zoom/2)",
+        "y": "ih/2-(ih/zoom/2)",
+    },
+    {   # Zoom in while camera drifts upward
+        "name": "zoom_in_drift_up",
+        "z": "min(zoom+0.00022,1.18)",
+        "x": "iw/2-(iw/zoom/2)",
+        "y": "if(lte(on,1),ih*0.12,max(y-0.12,0))",
+    },
+    {   # Zoom in while camera drifts downward
+        "name": "zoom_in_drift_down",
+        "z": "min(zoom+0.00022,1.15)",
+        "x": "iw/2-(iw/zoom/2)",
+        "y": "if(lte(on,1),0,min(y+0.12,ih-ih/zoom))",
+    },
+]
+
+
+def _select_motion_effect() -> dict:
+    """Select a random Ken Burns motion preset for visual variety."""
+    return random.choice(MOTION_EFFECTS)
 
 
 def _category_key(value: str) -> str:
@@ -156,27 +194,32 @@ def create_static_reel(image_path: Path, output_path: Path, audio_path: Path) ->
             "with `pip install -r requirements.txt`."
         ) from exc
 
+    total_frames = REEL_DURATION_SECONDS * REEL_FRAME_RATE
+    effect = _select_motion_effect()
+    log.info("[REEL] Ken Burns motion: %s (%d frames, %ds)",
+             effect["name"], total_frames, REEL_DURATION_SECONDS)
+
+    # Scale image up by 1.3x so zoom/pan effects maintain full resolution
+    upscale_w = int(REEL_WIDTH * 1.3)
+    upscale_h = int(REEL_HEIGHT * 1.3)
+    zoompan_filter = (
+        f"scale={upscale_w}:{upscale_h}:flags=lanczos,"
+        f"zoompan=z='{effect['z']}':x='{effect['x']}':y='{effect['y']}'"
+        f":d={total_frames}:s={REEL_WIDTH}x{REEL_HEIGHT}:fps={REEL_FRAME_RATE},"
+        "format=yuv420p"
+    )
+
     command = [
         imageio_ffmpeg.get_ffmpeg_exe(),
         "-y",
-        "-loop",
-        "1",
-        "-framerate",
-        str(REEL_FRAME_RATE),
         "-i",
         str(image_path.resolve()),
         "-stream_loop",
         "-1",
         "-i",
         str(audio_path.resolve()),
-        "-frames:v",
-        str(REEL_DURATION_SECONDS * REEL_FRAME_RATE),
         "-vf",
-        (
-            f"scale={REEL_WIDTH}:{REEL_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={REEL_WIDTH}:{REEL_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
-            "format=yuv420p"
-        ),
+        zoompan_filter,
         "-c:v",
         "libx264",
         "-preset",
@@ -189,8 +232,6 @@ def create_static_reel(image_path: Path, output_path: Path, audio_path: Path) ->
         "128k",
         "-ar",
         "44100",
-        "-r",
-        str(REEL_FRAME_RATE),
         "-t",
         str(REEL_DURATION_SECONDS),
         "-shortest",
