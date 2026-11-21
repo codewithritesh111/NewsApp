@@ -16,7 +16,7 @@ def _split_values(value: str) -> tuple[str, ...]:
 class Settings:
     ai_provider: str = os.getenv("AI_PROVIDER", "groq").strip().lower()
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
-    groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+    groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     output_dir: Path = PROJECT_ROOT / os.getenv("OUTPUT_DIR", "output")
     brand_name: str = os.getenv("BRAND_NAME", "The Daily Chronicle")
     cloudflare_account_id: str = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")

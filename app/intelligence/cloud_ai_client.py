@@ -235,9 +235,8 @@ class CloudAIResearcher:
                 {
                     "role": "system",
                     "content": (
-                        "You are a careful Indian news researcher. Follow the prompt exactly. "
-                        "Use browser_search; return only the requested single-image Reel JSON. "
-                        "Never invent facts, counts, or sources."
+                        "You are a fast, precise Indian news researcher. Follow the prompt instructions directly. "
+                        "Use browser_search concisely, synthesize your candidate selection quickly, and output the single requested JSON object without getting trapped in repetitive crawling or reasoning loops."
                     ),
                 },
                 {"role": "user", "content": prompt},
