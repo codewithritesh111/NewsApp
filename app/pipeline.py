@@ -963,35 +963,50 @@ def run_pipeline(
             sources_urls = [s.get("url") for s in plan.get("sources", []) if isinstance(s, dict) and s.get("url")]
             video_url = plan.get("video_url")
             headline = str(plan.get("headline", "")).strip()
-            video_search_query = (search_query or headline or (story.get("title") if isinstance(story, dict) else "")).strip()
+            news_title = str(story.get("title") if isinstance(story, dict) else headline or search_query).strip()
+            video_search_query = news_title or (search_query or headline).strip()
 
             news_video = None
             video_path = background_dir / "news_video.mp4"
-            log.info("[3/4] [MEDIA SEARCH] Step 1: Searching for news video first...")
+            log.info("[3/4] [MEDIA SEARCH] Step 1: Searching internet for 9:16 news video (20s-60s) for %r...", news_title)
             try:
                 news_video = fetch_news_video(
-                    video_url,
-                    article_url,
-                    sources_urls,
-                    video_path,
+                    video_url=video_url,
+                    article_url=article_url,
+                    sources_urls=sources_urls,
+                    output_path=video_path,
                     search_query=video_search_query,
+                    news_title=news_title,
                 )
             except Exception as exc:
                 log.warning("Video search/download failed: %s; proceeding to image search.", exc)
                 news_video = None
 
+            # Verify video duration is strictly between 20 sec and 1 min (60 sec)
+            if news_video and news_video.is_file():
+                dur, _ = inspect_video(news_video)
+                if dur < 20.0 or dur > 60.0:
+                    log.warning(
+                        "[MEDIA] News video duration %.1fs is outside [20s, 60s]. Discarding video and using 9:16 photo.",
+                        dur,
+                    )
+                    news_video.unlink(missing_ok=True)
+                    news_video = None
+
             if news_video:
-                log.info("[3/4] [MEDIA SEARCH] Real news video found and downloaded: %s", news_video)
+                dur, _ = inspect_video(news_video)
+                log.info("[3/4] [MEDIA SEARCH] News video validated (%s, %.1fs). Will use full video without trimming.", news_video, dur)
             else:
-                log.info("[3/4] [MEDIA SEARCH] Step 2: No news video found. Searching for real camera news photo...")
+                log.info("[3/4] [MEDIA SEARCH] Step 2: No valid [20s, 60s] news video. Searching internet for 9:16 photo for %r...", news_title)
                 try:
                     fetch_news_background(
-                        image_url,
-                        search_query.strip(),
-                        background_path,
+                        image_url=image_url,
+                        search_query=search_query.strip(),
+                        output_path=background_path,
                         article_url=article_url,
                         sources_urls=sources_urls,
                         pexels_api_key=pexels_api_key,
+                        news_title=news_title,
                     )
                 except Exception as exc:
                     log.warning("Web image search failed: %s; trying Cloudflare AI generation fallback.", exc)

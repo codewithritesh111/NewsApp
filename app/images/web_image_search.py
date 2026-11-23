@@ -161,13 +161,70 @@ def fetch_article_video(url: str, timeout: int = 8) -> str | None:
     return None
 
 
-def download_video(url: str, output_path: Path, timeout: int = 40) -> Path:
-    """Download video stream or mp4 from URL using ffmpeg or streaming HTTP."""
+def _decode_bing_url(url: str) -> str:
+    """Decode real destination URL from Bing click-tracking redirect link (u=a1<base64>)."""
+    if "u=a1" in url:
+        m = re.search(r"u=a1([A-Za-z0-9_-]+)", url)
+        if m:
+            b64_str = m.group(1)
+            b64_str += "=" * (-len(b64_str) % 4)
+            try:
+                import base64
+                decoded = base64.urlsafe_b64decode(b64_str).decode("utf-8", errors="ignore")
+                if decoded.startswith(("http://", "https://")):
+                    return decoded
+            except Exception:
+                pass
+    return url
+
+
+def probe_video_url(url: str, timeout: int = 10) -> tuple[float | None, int | None, int | None]:
+    """Probe remote video URL with ffmpeg and return (duration, width, height)."""
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        cmd = [ffmpeg_exe, "-hide_banner", "-i", url]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        out = res.stderr or ""
+        duration = None
+        m_dur = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
+        if m_dur:
+            h, m, s = m_dur.groups()
+            duration = int(h) * 3600 + int(m) * 60 + float(s)
+
+        width, height = None, None
+        m_dim = re.search(r"Stream\s*#\d+:\d+.*Video:.*?(\d{2,5})x(\d{2,5})", out)
+        if m_dim:
+            width, height = int(m_dim.group(1)), int(m_dim.group(2))
+        return duration, width, height
+    except Exception:
+        return None, None, None
+
+
+def download_video(
+    url: str,
+    output_path: Path,
+    timeout: int = 40,
+    min_duration: float = 20.0,
+    max_duration: float = 60.0,
+) -> Path:
+    """Download video stream or mp4 from URL using ffmpeg or streaming HTTP.
+    
+    Strictly verifies that video duration is between min_duration and max_duration.
+    """
     if not url or not url.startswith(("http://", "https://")):
         raise ValueError(f"Invalid video URL: {url!r}")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Fast probe to reject clearly out-of-bounds videos before heavy download
+    probed_dur, _, _ = probe_video_url(url, timeout=6)
+    if probed_dur is not None and (probed_dur < min_duration or probed_dur > max_duration):
+        raise ValueError(
+            f"Probed video duration {probed_dur:.1f}s is outside required [{min_duration}s, {max_duration}s] range."
+        )
+
+    downloaded = False
     try:
         import imageio_ffmpeg
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -175,53 +232,68 @@ def download_video(url: str, output_path: Path, timeout: int = 40) -> Path:
             ffmpeg_exe,
             "-y",
             "-i", url,
-            "-t", "65",
+            "-t", str(int(max_duration + 5)),
             "-c", "copy",
             str(output_path.resolve()),
         ]
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
         if result.returncode == 0 and output_path.is_file() and output_path.stat().st_size > 50000:
             log.info("[VIDEO SEARCH] Video downloaded successfully via FFmpeg: %s (%d bytes)", output_path, output_path.stat().st_size)
-            return output_path
+            downloaded = True
     except Exception as exc:
         log.warning("[VIDEO SEARCH] FFmpeg direct stream download failed: %s; trying requests stream.", exc)
 
-    # HTTP streaming fallback
-    resp = requests.get(url, headers=IMAGE_HEADERS, timeout=timeout, stream=True)
-    resp.raise_for_status()
-    with open(output_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=65536):
-            if chunk:
-                f.write(chunk)
+    if not downloaded:
+        # HTTP streaming fallback
+        resp = requests.get(url, headers=IMAGE_HEADERS, timeout=timeout, stream=True)
+        resp.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
 
     if not output_path.is_file() or output_path.stat().st_size < 50000:
         output_path.unlink(missing_ok=True)
         raise ValueError(f"Downloaded video file is too small or invalid: {url}")
+
+    # Inspect downloaded file to strictly verify duration [20s, 60s]
+    from app.images.reel_encoder import inspect_video
+    duration, _ = inspect_video(output_path)
+    if duration < min_duration or duration > max_duration:
+        output_path.unlink(missing_ok=True)
+        raise ValueError(
+            f"Downloaded video duration {duration:.1f}s is outside required [{min_duration}s, {max_duration}s] range."
+        )
+
     return output_path
 
 
 def search_news_videos(query: str, limit: int = 8) -> list[str]:
-    """Search Bing News for broadcast news videos, collect video article links, and extract stream URLs."""
+    """Search internet for videos matching the news title, collect video links, and extract stream URLs."""
     clean_query = _clean_search_query(query)
     if not clean_query:
         return []
-    encoded = quote_plus(f"{clean_query} video")
-    search_url = f"https://www.bing.com/news/search?q={encoded}"
+    # Search the internet for 9:16 vertical video for the news title
+    encoded = quote_plus(f"{clean_query} 9:16 video")
+    search_url = f"https://www.bing.com/videos/search?q={encoded}"
     try:
         resp = requests.get(search_url, headers=DEFAULT_HEADERS, timeout=10)
         if not resp.ok:
-            return []
+            fallback_url = f"https://www.bing.com/news/search?q={quote_plus(f'{clean_query} video')}"
+            resp = requests.get(fallback_url, headers=DEFAULT_HEADERS, timeout=10)
+            if not resp.ok:
+                return []
         links = re.findall(r'<a[^>]+href=[\x27\x22](https?://[^\x27\x22]+)[\x27\x22]', resp.text)
+        links.extend(re.findall(r'data-url=[\x27\x22](https?://[^\x27\x22]+)[\x27\x22]', resp.text))
 
         video_page_links: list[str] = []
-        for link in links:
+        for raw_link in links:
+            link = _decode_bing_url(raw_link)
             l_low = link.lower()
             if any(ign in l_low for ign in ("bing.com", "microsoft.com", "msn.com", "google.com", "youtube.com")):
                 continue
-            if any(k in l_low for k in ("video", "watch", "clip", "media", "show", "programme")):
-                if link not in video_page_links:
-                    video_page_links.append(link)
-            elif any(ch in l_low for ch in ("aajtak", "ndtv", "indiatoday", "abplive", "timesnow", "news18", "zeenews", "republicworld")):
+            # Search open internet video pages, clips, reels, shorts
+            if any(k in l_low for k in ("video", "watch", "clip", "media", "show", "programme", "reel", "shorts")):
                 if link not in video_page_links:
                     video_page_links.append(link)
 
@@ -232,58 +304,61 @@ def search_news_videos(query: str, limit: int = 8) -> list[str]:
                 video_stream_urls.append(v_stream)
         return video_stream_urls
     except Exception as exc:
-        log.warning("[VIDEO SEARCH] News video search failed: %s", exc)
+        log.warning("[VIDEO SEARCH] Internet video search failed: %s", exc)
         return []
 
 
 def fetch_news_video(
-    video_url: str | None,
-    article_url: str | None,
-    sources_urls: list[str] | None,
-    output_path: Path,
+    video_url: str | None = None,
+    article_url: str | None = None,
+    sources_urls: list[str] | None = None,
+    output_path: Path = Path("output/news_video.mp4"),
     search_query: str | None = None,
+    news_title: str | None = None,
 ) -> Path | None:
-    """Attempt to find and download a real news video from verified news articles or live video search."""
+    """Attempt to find and download a 9:16 video matching the news title from the internet.
+    
+    Strictly enforces video duration between 20 seconds and 1 minute (60 seconds).
+    If no video meeting the duration requirement is found, returns None.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    query = (news_title or search_query or "").strip()
+
     # 1. Direct video URL from plan if provided
     if video_url and video_url.strip():
         try:
             log.info("[VIDEO SEARCH] Attempting direct video_url: %s", video_url)
-            return download_video(video_url.strip(), output_path)
+            dl = download_video(video_url.strip(), output_path)
+            from app.images.reel_encoder import inspect_video
+            dur, _ = inspect_video(dl)
+            if 20.0 <= dur <= 60.0:
+                log.info("[VIDEO SEARCH] Direct video validated: duration=%.1fs", dur)
+                return dl
+            else:
+                log.warning("[VIDEO SEARCH] Direct video duration %.1fs is outside [20s, 60s]; rejecting.", dur)
+                dl.unlink(missing_ok=True)
         except Exception as exc:
             log.warning("[VIDEO SEARCH] Direct video URL download failed: %s", exc)
 
-    # 2. Check primary article URL
-    if article_url and article_url.strip():
-        v_url = fetch_article_video(article_url.strip())
-        if v_url:
-            try:
-                log.info("[VIDEO SEARCH] Found video in primary article (%s): %s", article_url, v_url)
-                return download_video(v_url, output_path)
-            except Exception as exc:
-                log.warning("[VIDEO SEARCH] Primary article video download failed: %s", exc)
-
-    # 3. Check all other source URLs from verified channels
-    if sources_urls:
-        for src_url in sources_urls:
-            if src_url and src_url.strip() and src_url != article_url:
-                v_url = fetch_article_video(src_url.strip())
-                if v_url:
-                    try:
-                        log.info("[VIDEO SEARCH] Found video in source article (%s): %s", src_url, v_url)
-                        return download_video(v_url, output_path)
-                    except Exception as exc:
-                        log.warning("[VIDEO SEARCH] Source article video download failed: %s", exc)
-
-    # 4. Search web news video pages (Bing News video search across news sites)
-    if search_query and search_query.strip():
-        log.info("[VIDEO SEARCH] Searching news video articles for %r...", search_query.strip())
-        discovered_streams = search_news_videos(search_query.strip(), limit=6)
+    # 2. Search open internet for 9:16 videos matching the news title
+    if query:
+        log.info("[VIDEO SEARCH] Searching the internet for 9:16 news video matching %r...", query)
+        discovered_streams = search_news_videos(query, limit=6)
         for stream_url in discovered_streams:
             try:
-                log.info("[VIDEO SEARCH] Trying discovered video stream: %s", stream_url)
-                return download_video(stream_url, output_path)
+                log.info("[VIDEO SEARCH] Trying discovered video stream from internet: %s", stream_url)
+                dl = download_video(stream_url, output_path)
+                from app.images.reel_encoder import inspect_video
+                dur, _ = inspect_video(dl)
+                if 20.0 <= dur <= 60.0:
+                    log.info("[VIDEO SEARCH] Validated internet video (duration=%.1fs): %s", dur, dl)
+                    return dl
+                else:
+                    log.warning("[VIDEO SEARCH] Video duration %.1fs is outside [20s, 60s]; rejecting.", dur)
+                    dl.unlink(missing_ok=True)
             except Exception as exc:
-                log.warning("[VIDEO SEARCH] Discovered stream download failed: %s", exc)
+                log.warning("[VIDEO SEARCH] Discovered stream download/validation failed: %s", exc)
 
     return None
 
@@ -495,18 +570,17 @@ def fetch_news_background(
     article_url: str | None = None,
     sources_urls: list[str] | None = None,
     pexels_api_key: str | None = None,
+    news_title: str | None = None,
 ) -> Path:
-    """Download a real camera-captured background image for a news post.
+    """Download a real camera-captured 9:16 background image for a news post from the internet.
 
     Order of priority:
     1. Direct image_url if provided.
-    2. Editorial press photo from the selected article URL (og:image).
-    3. Editorial press photo from verified source article URLs (og:image).
-    4. Bing News search for the headline/event, extracting photos from news outlets.
-    5. Bing Images search targeting real camera photos with portrait composition.
-    6. Bing Images search standard orientation (cover-cropped to 9:16).
-    7. Pexels portrait photo (if API key configured).
-    8. Wikimedia Commons.
+    2. Search the internet for 9:16 vertical photos matching the news title.
+    3. Pexels portrait photo matching the news title (if API key configured).
+    4. Standard image search on the internet (cover-cropped to 9:16 by image_composer).
+    5. Wikimedia Commons on the internet.
+    6. Fallback to news channel article photo if open internet search yields nothing.
     """
     errors: list[str] = []
 
@@ -518,50 +592,25 @@ def fetch_news_background(
             log.warning("[IMAGE SEARCH] Direct URL failed: %s", exc)
             errors.append(f"Direct URL: {exc}")
 
-    # 2. Extract editorial photos from all verified channels that published the news
-    channel_urls = []
-    if article_url and article_url.strip():
-        channel_urls.append(article_url.strip())
-    if sources_urls:
-        for u in sources_urls:
-            if u and u.strip() and u.strip() not in channel_urls:
-                channel_urls.append(u.strip())
-
-    for ch_url in channel_urls:
-        og_url = fetch_article_og_image(ch_url)
-        if og_url:
-            try:
-                log.info("[IMAGE SEARCH] Found editorial photo from verified channel (%s): %s", ch_url, og_url)
-                return download_image(og_url, output_path, require_portrait=False, require_photo=True)
-            except Exception as exc:
-                errors.append(f"Channel photo ({ch_url}): {exc}")
-
-    raw_query = (search_query or "").strip()
-    clean_query = _clean_search_query(raw_query)
+    # Determine query based on news title
+    title_text = (news_title or search_query or "").strip()
+    clean_query = _clean_search_query(title_text)
     if not clean_query:
-        summary = "; ".join(errors) if errors else "No image_url, article_url, or search_query provided"
+        summary = "; ".join(errors) if errors else "No image_url, search_query, or news_title provided"
         raise ValueError(f"Could not obtain a background image. {summary}")
-
-    # 4. Search Bing News for top news articles and extract real press photos
-    log.info("[IMAGE SEARCH] Searching news editorial photos for %r...", clean_query)
-    news_photos = search_news_editorial_photos(clean_query, limit=5)
-    for photo_url in news_photos:
-        try:
-            log.info("[IMAGE SEARCH] Trying news editorial photo: %s", photo_url)
-            return download_image(photo_url, output_path, require_portrait=False, require_photo=True)
-        except Exception as exc:
-            errors.append(f"News photo {photo_url}: {exc}")
 
     words = clean_query.split()
     core_query = " ".join(words[:4]) if len(words) > 4 else clean_query
-    photo_query = f"{clean_query} camera photo -satellite -diagram -space -clipart -vector"
 
-    # 5. Search Bing Images for portrait real photos
-    log.info("[IMAGE SEARCH] Querying Bing Images for real photos matching: %r (core: %r)", photo_query, core_query)
+    # 2. Search open internet for 9:16 vertical portrait images for the news title
+    log.info("[IMAGE SEARCH] Querying open internet for 9:16 ratio photos matching news title: %r (core: %r)", clean_query, core_query)
     candidate_urls: list[str] = []
-    candidate_urls.extend(search_bing_images(photo_query, limit=10, aspect_tall=True))
+    # Queries targeting 9:16 ratio and vertical portrait across the internet
+    candidate_urls.extend(search_bing_images(f"{clean_query} 9:16 photo", limit=10, aspect_tall=True))
+    candidate_urls.extend(search_bing_images(f"{clean_query} vertical photo", limit=8, aspect_tall=True))
+    candidate_urls.extend(search_bing_images(f"{clean_query} photo", limit=8, aspect_tall=True))
     if core_query != clean_query:
-        candidate_urls.extend(search_bing_images(f"{core_query} photo", limit=8, aspect_tall=True))
+        candidate_urls.extend(search_bing_images(f"{core_query} photo", limit=6, aspect_tall=True))
 
     for url in candidate_urls:
         try:
@@ -569,14 +618,15 @@ def fetch_news_background(
         except Exception as exc:
             errors.append(f"Tall URL {url}: {exc}")
 
-    # 6. Fallback to Pexels if API key provided
+    # 3. Fallback to Pexels portrait if API key provided
     if pexels_api_key:
         try:
             return search_pexels(core_query, pexels_api_key, output_path, orientation="portrait")
         except ValueError as exc:
             errors.append(f"Pexels: {exc}")
 
-    # 7. Standard image search (will be cover-cropped to 9:16 by image_composer)
+    # 4. Standard image search on open internet (will be cover-cropped to 9:16 by image_composer)
+    photo_query = f"{clean_query} camera photo -satellite -diagram -space -clipart -vector"
     standard_urls: list[str] = []
     standard_urls.extend(search_bing_images(photo_query, limit=12, aspect_tall=False))
     if core_query != clean_query:
@@ -589,5 +639,23 @@ def fetch_news_background(
         except Exception as exc:
             errors.append(f"Standard URL {url}: {exc}")
 
+    # 5. Fallback to news channel article photos if internet search returns nothing
+    channel_urls = []
+    if article_url and article_url.strip():
+        channel_urls.append(article_url.strip())
+    if sources_urls:
+        for u in sources_urls:
+            if u and u.strip() and u.strip() not in channel_urls:
+                channel_urls.append(u.strip())
+
+    for ch_url in channel_urls:
+        og_url = fetch_article_og_image(ch_url)
+        if og_url:
+            try:
+                log.info("[IMAGE SEARCH] Fallback to channel photo (%s): %s", ch_url, og_url)
+                return download_image(og_url, output_path, require_portrait=False, require_photo=True)
+            except Exception as exc:
+                errors.append(f"Channel photo ({ch_url}): {exc}")
+
     summary = "; ".join(errors[-4:]) if errors else "No images found"
-    raise ValueError(f"Could not obtain a background image for query {clean_query!r}. {summary}")
+    raise ValueError(f"Could not obtain a 9:16 background image for query {clean_query!r}. {summary}")

@@ -262,6 +262,72 @@ class TestChannelVerificationAndImageSourcing(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertIn("12 hours ago", issue)
 
+    def test_create_video_reel_strictly_requires_duration_between_20s_and_60s(self):
+        import tempfile
+        from app.images.reel_encoder import create_video_reel
+
+        with tempfile.TemporaryDirectory() as td:
+            video_file = Path(td) / "short.mp4"
+            overlay_file = Path(td) / "overlay.png"
+            output_file = Path(td) / "reel.mp4"
+            video_file.write_bytes(b"dummy video")
+            overlay_file.write_bytes(b"dummy overlay")
+
+            # Case 1: Duration < 20s strictly rejected
+            with patch("app.images.reel_encoder.inspect_video", return_value=(15.0, False)):
+                with self.assertRaises(ValueError) as ctx:
+                    create_video_reel(video_file, overlay_file, output_file)
+                self.assertIn("outside required [20s, 60s] range", str(ctx.exception))
+
+            # Case 2: Duration > 60s strictly rejected
+            with patch("app.images.reel_encoder.inspect_video", return_value=(75.0, False)):
+                with self.assertRaises(ValueError) as ctx:
+                    create_video_reel(video_file, overlay_file, output_file)
+                self.assertIn("outside required [20s, 60s] range", str(ctx.exception))
+
+            # Case 3: Duration between 20s and 60s accepted without trimming
+            with patch("app.images.reel_encoder.inspect_video", return_value=(38.5, True)):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0, stderr="")
+                    create_video_reel(video_file, overlay_file, output_file)
+                    self.assertTrue(mock_run.called)
+                    cmd = mock_run.call_args[0][0]
+                    # Verify target_duration is exactly 38.5 without trimming
+                    self.assertIn("-t", cmd)
+                    t_idx = cmd.index("-t")
+                    self.assertEqual(cmd[t_idx + 1], "38.5")
+                    # Verify no looping on the video input
+                    self.assertNotIn("-stream_loop", cmd)
+
+    def test_fetch_news_background_queries_open_internet_in_9_16_ratio(self):
+        import tempfile
+        from app.images.web_image_search import fetch_news_background
+
+        with tempfile.TemporaryDirectory() as td:
+            out_img = Path(td) / "bg.jpg"
+            with patch("app.images.web_image_search.search_bing_images") as mock_bing:
+                with patch("app.images.web_image_search.download_image") as mock_dl:
+                    mock_bing.return_value = ["https://photos.openweb.org/space916.jpg"]
+                    mock_dl.return_value = out_img
+
+                    res = fetch_news_background(
+                        image_url=None,
+                        search_query="ISRO space launch",
+                        output_path=out_img,
+                        news_title="ISRO Launches Heavy Satellite",
+                    )
+                    self.assertEqual(res, out_img)
+                    # Verify Bing Images was queried with aspect_tall=True for 9:16 vertical images
+                    called_tall = any(
+                        call.kwargs.get("aspect_tall") is True for call in mock_bing.call_args_list
+                    )
+                    self.assertTrue(called_tall)
+                    # Verify search query includes 9:16 targeting
+                    query_terms = [call.args[0] for call in mock_bing.call_args_list if call.args]
+                    self.assertTrue(any("9:16" in q for q in query_terms))
+                    # Verify download_image required portrait orientation
+                    self.assertTrue(mock_dl.call_args.kwargs.get("require_portrait"))
+
 
 if __name__ == "__main__":
     unittest.main()

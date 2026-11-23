@@ -218,27 +218,57 @@ def create_static_reel(image_path: Path, output_path: Path, audio_path: Path) ->
     return output_path
 
 
-def inspect_video(video_path: Path | str) -> tuple[float, bool]:
-    """Inspect a video file and return (duration_in_seconds, has_audio_stream)."""
+def inspect_video_details(video_path: Path | str) -> dict:
+    """Inspect a video file and return detailed metadata (duration, audio, dims, aspect ratio)."""
     video_path = Path(video_path)
     try:
         import imageio_ffmpeg
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        return 20.0, False
+        return {
+            "duration": 20.0,
+            "has_audio": False,
+            "width": 1080,
+            "height": 1920,
+            "aspect_ratio": 1920 / 1080,
+            "is_9_16": True,
+        }
 
     command = [ffmpeg_exe, "-hide_banner", "-i", str(video_path.resolve())]
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     output = result.stderr or ""
 
-    duration = 20.0
+    duration = 20.0 if not video_path.is_file() else 0.0
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
     if match:
         h, m, s = match.groups()
         duration = int(h) * 3600 + int(m) * 60 + float(s)
 
     has_audio = bool(re.search(r"Stream\s*#\d+:\d+.*Audio:", output))
-    return max(0.1, duration), has_audio
+
+    width, height = 1080, 1920
+    dim_match = re.search(r"Stream\s*#\d+:\d+.*Video:.*?(\d{2,5})x(\d{2,5})", output)
+    if dim_match:
+        width = int(dim_match.group(1))
+        height = int(dim_match.group(2))
+
+    aspect_ratio = height / max(1, width)
+    is_9_16 = height >= width or "9:16" in output or aspect_ratio >= 1.0
+
+    return {
+        "duration": max(0.0, duration),
+        "has_audio": has_audio,
+        "width": width,
+        "height": height,
+        "aspect_ratio": aspect_ratio,
+        "is_9_16": is_9_16,
+    }
+
+
+def inspect_video(video_path: Path | str) -> tuple[float, bool]:
+    """Inspect a video file and return (duration_in_seconds, has_audio_stream)."""
+    details = inspect_video_details(video_path)
+    return max(0.1, details["duration"]), details["has_audio"]
 
 
 def create_video_reel(
@@ -247,7 +277,7 @@ def create_video_reel(
     output_path: Path | str,
     bgm_path: Path | str | None = None,
 ) -> Path:
-    """Superimpose text overlay on video, trimming to [20s, 60s] and keeping sound or adding BGM."""
+    """Superimpose text overlay on video without trimming, requiring duration between 20s and 60s."""
     video_path = Path(video_path)
     overlay_path = Path(overlay_path)
     output_path = Path(output_path)
@@ -266,13 +296,15 @@ def create_video_reel(
 
     raw_duration, has_audio = inspect_video(video_path)
 
-    # Video duration: at least 20 sec and at most 1 min (60 sec)
-    if raw_duration > 60.0:
-        target_duration = 60.0
-    elif raw_duration < 20.0:
-        target_duration = 20.0
-    else:
-        target_duration = round(raw_duration, 2)
+    # Strictly require video duration between 20 sec and 1 min (60 sec)
+    if raw_duration < 20.0 or raw_duration > 60.0:
+        raise ValueError(
+            f"Video duration {raw_duration:.1f}s is outside required [20s, 60s] range. "
+            "Only news videos with length strictly between 20 seconds and 1 minute can be used."
+        )
+
+    # No need to trim video: preserve full duration as-is without looping
+    target_duration = round(raw_duration, 2)
 
     filter_complex = (
         f"[0:v]scale={REEL_WIDTH}:{REEL_HEIGHT}:force_original_aspect_ratio=increase,"
@@ -281,11 +313,10 @@ def create_video_reel(
     )
 
     if has_audio:
-        # Keep original audio, do not add BGM
+        # Keep original audio, do not add BGM, do not loop or trim video
         command = [
             ffmpeg_exe,
             "-y",
-            "-stream_loop", "-1",
             "-i", str(video_path.resolve()),
             "-i", str(overlay_path.resolve()),
             "-t", str(target_duration),
@@ -303,14 +334,14 @@ def create_video_reel(
             str(output_path.resolve()),
         ]
     else:
-        # Silent video, add BGM
+        # Silent video, add BGM (BGM loops if shorter than video, fades out at video end)
         if bgm_path and bgm_path.is_file():
-            audio_filter = f"[2:a]afade=t=out:st={max(0, target_duration - 0.5):.2f}:d=0.5[aout]"
+            fade_start = max(0.0, target_duration - 1.0)
+            audio_filter = f"[2:a]afade=t=out:st={fade_start:.2f}:d=1.0[aout]"
             full_filter = f"{filter_complex};{audio_filter}"
             command = [
                 ffmpeg_exe,
                 "-y",
-                "-stream_loop", "-1",
                 "-i", str(video_path.resolve()),
                 "-i", str(overlay_path.resolve()),
                 "-stream_loop", "-1",
@@ -333,7 +364,6 @@ def create_video_reel(
             command = [
                 ffmpeg_exe,
                 "-y",
-                "-stream_loop", "-1",
                 "-i", str(video_path.resolve()),
                 "-i", str(overlay_path.resolve()),
                 "-t", str(target_duration),
