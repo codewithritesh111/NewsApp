@@ -67,30 +67,51 @@ class CloudAIResearcher:
     @staticmethod
     def _normalize_plan_shape(plan: dict[str, Any]) -> dict[str, Any]:
         story = plan.get("selected_story")
-        if not isinstance(story, dict):
-            return plan
-
-        plan_fields = (
-            "category",
-            "headline",
-            "image_body",
-            "background_image_prompt",
-            "description",
-            "hashtags",
-            "sources",
-        )
-        moved_fields = []
-        for field in plan_fields:
-            if field in story:
-                if field not in plan:
-                    plan[field] = story[field]
-                    moved_fields.append(field)
-                del story[field]
-        if moved_fields:
-            log.warning(
-                "[GROQ] Promoted plan fields nested under selected_story to the top level: %s.",
-                ", ".join(moved_fields),
+        if isinstance(story, dict):
+            plan_fields = (
+                "category",
+                "headline",
+                "image_body",
+                "background_image_prompt",
+                "highlight_words",
+                "image_plan",
+                "image_plans",
+                "description",
+                "hashtags",
+                "sources",
             )
+            moved_fields = []
+            for field in plan_fields:
+                if field in story:
+                    if field not in plan:
+                        plan[field] = story[field]
+                        moved_fields.append(field)
+                    del story[field]
+            if moved_fields:
+                log.warning(
+                    "[GROQ] Promoted plan fields nested under selected_story to the top level: %s.",
+                    ", ".join(moved_fields),
+                )
+
+        image_plans = plan.get("image_plans")
+        if isinstance(image_plans, list) and image_plans and isinstance(image_plans[0], dict):
+            if "image_plan" not in plan or not isinstance(plan.get("image_plan"), dict):
+                plan["image_plan"] = image_plans[0]
+
+        image_plan = plan.get("image_plan")
+        if isinstance(image_plan, dict):
+            mappings = (
+                ("headline_text", "headline"),
+                ("short_news_description", "image_body"),
+                ("background_image_prompt", "background_image_prompt"),
+                ("highlight_words", "highlight_words"),
+            )
+            for src_key, dst_key in mappings:
+                if dst_key not in plan or not plan[dst_key]:
+                    val = image_plan.get(src_key)
+                    if val:
+                        plan[dst_key] = val
+
         return plan
 
     def _post(self, payload: dict, api_key: str | None = None) -> dict:
@@ -231,9 +252,10 @@ class CloudAIResearcher:
                 {
                     "role": "system",
                     "content": (
-                        "You are a careful Indian news researcher. Follow the prompt exactly. "
-                        "Use browser_search; return only the requested single-image Reel JSON. "
-                        "Never invent facts, counts, or sources."
+                        "You are the Viral News Discovery Editor for an Indian Instagram news channel. "
+                        "Follow all editorial, non-controversial, freshness, and scoring rules exactly. "
+                        "Use browser_search concisely across approved categories and return only the "
+                        "single requested Reel JSON. Never fabricate sources, URLs, statistics, or timestamps."
                     ),
                 },
                 {"role": "user", "content": prompt},

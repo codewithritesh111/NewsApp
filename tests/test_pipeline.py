@@ -14,7 +14,15 @@ from PIL import Image, ImageChops
 
 from app.config import Settings
 from app.images.image_composer import compose_news_image, compose_slide
-from app.images.reel_encoder import CATEGORY_BGM_ALIASES, create_static_reel, select_bgm_track
+from app.images.reel_encoder import (
+    CATEGORY_BGM_ALIASES,
+    ENDCLIP_BGM_PATH,
+    REEL_TRANSITIONS,
+    create_static_reel,
+    select_bgm_track,
+    select_endclip_video,
+    select_reel_transition,
+)
 from app.images.image_composer import _normalise_display_text
 from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
@@ -76,15 +84,32 @@ class TrendPipelineTests(unittest.TestCase):
         self._temp_rotation = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
         self._temp_rotation.write(b'{"groq": 0, "cloudflare": 0}\n')
         self._temp_rotation.close()
+        self._temp_bgm_rotation = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        self._temp_bgm_rotation.write(b'{}\n')
+        self._temp_bgm_rotation.close()
+        self._temp_reel_rotation = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        self._temp_reel_rotation.write(b'{}\n')
+        self._temp_reel_rotation.close()
         self._history_patch = patch("app.pipeline.POSTING_HISTORY_PATH", Path(self._temp_history.name))
         self._rotation_patch = patch("app.pipeline.CREDENTIAL_ROTATION_PATH", Path(self._temp_rotation.name))
+        self._bgm_rotation_patch = patch("app.pipeline.BGM_ROTATION_PATH", Path(self._temp_bgm_rotation.name))
+        self._reel_rotation_patch = patch("app.pipeline.REEL_ROTATION_PATH", Path(self._temp_reel_rotation.name))
         self._history_patch.start()
         self._rotation_patch.start()
+        self._bgm_rotation_patch.start()
+        self._reel_rotation_patch.start()
 
     def tearDown(self):
         self._history_patch.stop()
         self._rotation_patch.stop()
-        for path in (self._temp_history.name, self._temp_rotation.name):
+        self._bgm_rotation_patch.stop()
+        self._reel_rotation_patch.stop()
+        for path in (
+            self._temp_history.name,
+            self._temp_rotation.name,
+            self._temp_bgm_rotation.name,
+            self._temp_reel_rotation.name,
+        ):
             try:
                 os.unlink(path)
             except OSError:
@@ -93,7 +118,9 @@ class TrendPipelineTests(unittest.TestCase):
     def test_news_prompt_requires_category_shortlist_then_global_comparison(self):
         prompt = build_news_and_post_plan_prompt()
 
-        self.assertIn("5 latest, trending, impactful, attention-drawing indian news", prompt.lower())
+        self.assertIn("viral news discovery editor", prompt.lower())
+        self.assertIn("strictly prohibited content", prompt.lower())
+        self.assertIn("below 65 reject", prompt.lower())
         self.assertIn("shortlisted candidate", prompt.lower())
         self.assertIn("last 15 news posted", prompt.lower())
         self.assertIn("last 3 hrs", prompt.lower())
@@ -101,15 +128,14 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertIn("like, share and follow", prompt.lower())
         self.assertIn("see description for more detail", prompt.lower())
         for category in (
-            "Crime",
-            "Politics",
-            "Geopolitics",
-            "Disaster",
-            "Achievement",
-            "BreakingNews",
-            "Business",
-            "Trends",
-            "EmergencyReporting",
+            "Sports and Cricket",
+            "Technology and Artificial Intelligence",
+            "Entertainment",
+            "Science and Space",
+            "Business and Startups",
+            "Education and Careers",
+            "Amazing and Unusual News",
+            "Useful Public Information",
         ):
             self.assertIn(category, prompt)
 
@@ -830,14 +856,14 @@ class TrendPipelineTests(unittest.TestCase):
                 output_path.write_bytes(b"background")
                 return output_path
 
-        def capture_image(background, output, headline, body, brand, width, height):
+        def capture_image(background, output, headline, body, brand, width, height, **_kwargs):
             rendered_images.append(
                 (headline, body, brand, width, height)
             )
             output.write_bytes(b"jpeg")
             return output
 
-        def capture_reel(image_path, output_path, _audio_path):
+        def capture_reel(image_path, output_path, _audio_path, **_kwargs):
             output_path.write_bytes(b"mp4")
             return output_path
 
@@ -892,7 +918,10 @@ class TrendPipelineTests(unittest.TestCase):
             summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["selection_method"], "groq_browser_search")
             self.assertEqual(summary["category"], "Technology")
-            self.assertEqual(Path(summary["bgm_file"]).name, "Other.m4a")
+            self.assertIn(
+                Path(summary["bgm_file"]).name,
+                {"Inspired.mp3", "Motivator.mp3", "Protofunk.mp3", "Tech Live.mp3"},
+            )
             self.assertEqual(summary["public_video_url"], None)
             self.assertTrue((Path(summary["post_directory"]) / "news_image.jpg").is_file())
             self.assertTrue((Path(summary["post_directory"]) / "reel.mp4").is_file())
@@ -900,8 +929,8 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertFalse((run_dir / "candidates.json").exists())
             prompt, max_tokens = requests_seen[0]
             self.assertEqual(max_tokens, 9000)
-            self.assertIn("browser search", prompt.lower())
-            self.assertIn("5 latest, trending, impactful, attention-drawing indian news", prompt.lower())
+            self.assertIn("browser_search", prompt.lower())
+            self.assertIn("viral news discovery editor", prompt.lower())
             self.assertIn("shortlisted candidate", prompt.lower())
             self.assertIn("5-15 word", prompt.lower())
             self.assertIn("500 words", prompt.lower())
@@ -1146,29 +1175,200 @@ class TrendPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "bgm_rotation.json"
 
-            # Category with 3 tracks (Politics: Division.mp3, Symmetry.mp3, The Complex.mp3)
-            # Cycles round-robin:
-            t1 = select_bgm_track("Politics", rotation_state_path=state_path)
-            t2 = select_bgm_track("Politics", rotation_state_path=state_path)
-            t3 = select_bgm_track("Politics", rotation_state_path=state_path)
-            t4 = select_bgm_track("Politics", rotation_state_path=state_path)
+            # Every active & legacy category has 4 curated tracks rotating round-robin
+            for category in NEWS_CATEGORIES:
+                picked = [
+                    select_bgm_track(category, rotation_state_path=state_path).name
+                    for _ in range(4)
+                ]
+                self.assertEqual(len(set(picked)), 4, f"Expected 4 distinct tracks for {category}")
+                fifth = select_bgm_track(category, rotation_state_path=state_path).name
+                self.assertEqual(fifth, picked[0], f"Expected round-robin wrap for {category}")
 
-            self.assertEqual(t1.name, "Division.mp3")
-            self.assertEqual(t2.name, "Symmetry.mp3")
-            self.assertEqual(t3.name, "The Complex.mp3")
-            self.assertEqual(t4.name, "Division.mp3")
+            # Unknown category falls back to Other/ (4 tracks rotating round-robin)
+            unknown_picks = [
+                select_bgm_track("UnknownCat", rotation_state_path=state_path).name
+                for _ in range(4)
+            ]
+            self.assertEqual(
+                unknown_picks,
+                ["District Four.mp3", "Electro Cabello.mp3", "Mighty Like Us.mp3", "Take a Chance.mp3"],
+            )
 
-            # BreakingNews (News Theme.mp3, Stormfront.mp3, Volatile Reaction.mp3)
-            b1 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
-            b2 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
-            self.assertEqual(b1.name, "News Theme.mp3")
-            self.assertEqual(b2.name, "Stormfront.mp3")
+    def test_instagram_trending_gate_rejects_routine_or_low_virality_stories(self):
+        base_result = {
+            "research_metrics": {"candidate_count": 5, "unique_candidate_count": 5},
+            "selected_story": {
+                "title": "Routine ministry review meeting held in Delhi",
+                "event_summary": "Officials held a routine quarterly review meeting in New Delhi today",
+            },
+            "publish_assessment": {
+                "eligible": True,
+                "instagram_algorithm_fit": True,
+                "viral_shareability": "HIGH",
+                "scroll_stop_hook": "HIGH",
+                "mass_relatability": "HIGH",
+                "is_routine_or_low_engagement": False,
+                "cooldown_active": False,
+                "cooldown_exception": "NONE",
+                "reason": "Trending update.",
+            },
+            "category": "BreakingNews",
+            "headline": "Big New UPI Change Hits Millions Today",
+            "highlight_words": ["UPI Change", "Millions"],
+            "image_body": "NPCI rolled out instant rules affecting daily digital payments for users across India starting today.",
+            "background_image_prompt": "Vibrant scene of smartphone UPI payment in busy Indian market.",
+            "description": "Important payment update for all Indians. Like, share and follow.",
+            "hashtags": ["#UPI", "#IndiaNews", "#Trending", "#DigitalIndia", "#Update"],
+            "sources": [{"url": "https://example.com/upi"}],
+        }
 
-            # Other remains unchanged as Other.m4a
-            self.assertEqual(select_bgm_track("Other", rotation_state_path=state_path).name, "Other.m4a")
+        self.assertIsNone(_publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False))
 
-            # Unknown category falls back to Other.m4a
-            self.assertEqual(select_bgm_track("UnknownCat", rotation_state_path=state_path).name, "Other.m4a")
+        # Reject when instagram_algorithm_fit is False
+        base_result["publish_assessment"]["instagram_algorithm_fit"] = False
+        self.assertIn(
+            "Instagram Reels",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False),
+        )
+        base_result["publish_assessment"]["instagram_algorithm_fit"] = True
+
+        # Reject when is_routine_or_low_engagement is True
+        base_result["publish_assessment"]["is_routine_or_low_engagement"] = True
+        self.assertIn(
+            "Routine or low-engagement",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False),
+        )
+        base_result["publish_assessment"]["is_routine_or_low_engagement"] = False
+
+        # Reject when viral_shareability is below HIGH
+        base_result["publish_assessment"]["viral_shareability"] = "MODERATE"
+        self.assertIn(
+            "Viral shareability",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False),
+        )
+        base_result["publish_assessment"]["viral_shareability"] = "HIGH"
+
+        # Reject when prohibited_content_free is False
+        base_result["publish_assessment"]["prohibited_content_free"] = False
+        self.assertIn(
+            "prohibited",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False),
+        )
+        base_result["publish_assessment"]["prohibited_content_free"] = True
+
+        # Reject when is_developing_unconfirmed is True
+        base_result["publish_assessment"]["is_developing_unconfirmed"] = True
+        self.assertIn(
+            "developing",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False),
+        )
+        base_result["publish_assessment"]["is_developing_unconfirmed"] = False
+
+        # Reject when viral_score < 65 (normal) or < 75 (cooldown active)
+        base_result["publish_assessment"]["viral_score"] = 64
+        self.assertIn(
+            "65-point",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False),
+        )
+        base_result["publish_assessment"]["viral_score"] = 70
+        base_result["publish_assessment"]["cooldown_exception"] = "MAJOR_CHANGE"
+        self.assertIsNone(
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False)
+        )
+        self.assertIn(
+            "75-point",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True),
+        )
+        base_result["publish_assessment"]["viral_score"] = 85
+        self.assertIsNone(
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=True)
+        )
+
+        # Allow 24-48h window ONLY when extended_48h_window is True
+        old_36h = (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat()
+        base_result["publish_assessment"]["actual_event_at"] = old_36h
+        base_result["publish_assessment"]["extended_48h_window"] = False
+        self.assertIn(
+            "older than 24 hours",
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False),
+        )
+        base_result["publish_assessment"]["extended_48h_window"] = True
+        self.assertIsNone(
+            _publish_gate_rejection_reason(base_result, [], posting_cooldown_active=False)
+        )
+
+    def test_compose_news_image_highlights_and_saves_layered_assets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bg = root / "background.jpg"
+            out = root / "news_image.jpg"
+            overlay = root / "reel_overlay.png"
+            cropped_bg = root / "reel_background.jpg"
+            Image.new("RGB", (1024, 1024), color=(50, 120, 180)).save(bg)
+
+            compose_news_image(
+                bg,
+                out,
+                "ISRO launches 36 satellites in record 2026 mission",
+                "India successfully placed 36 satellites into orbit today marking a historic leap for global space launches.",
+                "The Daily Chronicle",
+                category="Achievement",
+                highlight_words=["36 satellites", "record 2026"],
+                overlay_output_path=overlay,
+                cropped_bg_output_path=cropped_bg,
+            )
+
+            self.assertTrue(out.is_file())
+            self.assertTrue(overlay.is_file())
+            self.assertTrue(cropped_bg.is_file())
+            with Image.open(overlay) as ov_img:
+                self.assertEqual(ov_img.mode, "RGBA")
+                self.assertEqual(ov_img.size, (1080, 1920))
+            with Image.open(cropped_bg) as bg_img:
+                self.assertEqual(bg_img.size, (1080, 1920))
+
+    def test_layered_motion_reel_encoder_outputs_15_second_vertical_mp4(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bg = root / "background.jpg"
+            still = root / "news_image.jpg"
+            overlay = root / "reel_overlay.png"
+            cropped_bg = root / "reel_background.jpg"
+            output = root / "reel.mp4"
+            audio = root / "bgm.wav"
+            Image.new("RGB", (1024, 1024), color=(30, 80, 130)).save(bg)
+            compose_news_image(
+                bg,
+                still,
+                "India hits record solar milestone in 2026",
+                "Clean power capacity surges across multiple states as new grid projects go live nationwide today.",
+                "The Daily Chronicle",
+                category="Business",
+                overlay_output_path=overlay,
+                cropped_bg_output_path=cropped_bg,
+            )
+            sample_rate = 44100
+            with wave.open(str(audio), "wb") as track:
+                track.setnchannels(1)
+                track.setsampwidth(2)
+                track.setframerate(sample_rate)
+                track.writeframes(
+                    b"".join(
+                        struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / sample_rate)))
+                        for i in range(sample_rate)
+                    )
+                )
+
+            create_static_reel(still, output, audio)
+
+            self.assertGreater(output.stat().st_size, 0)
+            ffmpeg = __import__("imageio_ffmpeg").get_ffmpeg_exe()
+            probe = __import__("subprocess").run([ffmpeg, "-i", str(output)], capture_output=True, text=True)
+            self.assertIn("Video:", probe.stderr)
+            self.assertIn("1080x1920", probe.stderr)
+            self.assertIn("15.00", probe.stderr)
+            self.assertIn("Audio:", probe.stderr)
 
     def test_news_prompt_with_cooldown_active_enforces_exception_rules(self):
         prompt = build_news_and_post_plan_prompt(posting_cooldown_active=True)
@@ -1208,6 +1408,286 @@ class TrendPipelineTests(unittest.TestCase):
         # If bright is already present, doesn't duplicate
         already_bright = "A bright vibrant scene with attractive background scenery"
         self.assertEqual(_enhance_image_prompt(already_bright), already_bright)
+
+    def test_prompt_includes_background_image_plan_generator_guidelines(self):
+        prompt = build_news_and_post_plan_prompt()
+        self.assertIn("instagram reel background image plan generator", prompt.lower())
+        self.assertIn("9:16", prompt)
+        self.assertIn("1080 × 1920", prompt)
+        self.assertIn("20–35", prompt)
+        self.assertIn("image_plan", prompt)
+        self.assertIn("colour_palette", prompt)
+        self.assertIn("negative_prompt", prompt)
+        self.assertIn("do not fabricate identifiable players", prompt.lower())
+        self.assertIn("do not fabricate identifiable celebrity faces", prompt.lower())
+
+    def test_normalize_plan_shape_promotes_nested_image_plan_fields(self):
+        raw = {
+            "selected_story": {"title": "ISRO mission milestone", "event_summary": "ISRO launches orbital satellite test"},
+            "category": "Science and Space",
+            "image_plan": {
+                "brand_name": "The Daily Chronicle",
+                "aspect_ratio": "9:16",
+                "headline_text": "ISRO Tests Orbital Launch System",
+                "short_news_description": "ISRO verified a major propulsion milestone today, advancing upcoming launch schedules and satellite deployment capabilities across India.",
+                "background_image_prompt": "Photorealistic rocket on launchpad at twilight with dramatic lighting",
+            },
+        }
+        normalized = CloudAIResearcher._normalize_plan_shape(raw)
+        self.assertEqual(normalized["headline"], "ISRO Tests Orbital Launch System")
+        self.assertIn("propulsion milestone", normalized["image_body"])
+        self.assertIn("rocket on launchpad", normalized["background_image_prompt"])
+
+    def test_composer_supports_accent_hex_contrast_fallback_and_top_position(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bg = root / "bg.jpg"
+            out_top = root / "top.jpg"
+            out_light = root / "light.jpg"
+            Image.new("RGB", (1024, 1024), color=(50, 90, 140)).save(bg)
+
+            compose_news_image(
+                bg,
+                out_top,
+                "India tests high speed rail corridor",
+                "Rail engineers completed trial runs today, marking a major step toward faster intercity travel across India.",
+                "The Daily Chronicle",
+                category="Useful Public Information",
+                accent_hex="#1D4ED8",
+                text_position="top",
+            )
+            self.assertTrue(out_top.is_file())
+            with Image.open(out_top) as img:
+                self.assertEqual(img.size, (1080, 1920))
+                # Brand masthead pill at (100, 125) should adopt rich #1D4ED8 blue accent
+                r, g, b = img.getpixel((80, 115))
+                self.assertGreater(b, r * 2)
+
+            # Pale yellow #FEF08A should be rejected for white-text contrast and fall back to category accent
+            compose_news_image(
+                bg,
+                out_light,
+                "India tests high speed rail corridor",
+                "Rail engineers completed trial runs today, marking a major step toward faster intercity travel across India.",
+                "The Daily Chronicle",
+                category="Useful Public Information",
+                accent_hex="#FEF08A",
+                text_position="bottom",
+            )
+            with Image.open(out_light) as img_light:
+                r2, g2, b2 = img_light.getpixel((80, 115))
+                self.assertGreater(r2, g2 * 2)  # Falls back to crimson accent (225, 39, 49)
+
+    def test_validate_generated_plan_enforces_image_plan_brand_and_aspect_ratio(self):
+        plan = {
+            "selected_story": {
+                "title": "ISRO completes key orbital test",
+                "event_summary": "ISRO completes key orbital propulsion test in southern India",
+            },
+            "category": "Science and Space",
+            "headline": "ISRO Completes Orbital Test",
+            "image_body": (
+                "ISRO verified a major propulsion milestone today, advancing upcoming satellite launches "
+                "and strengthening India's commercial space mission readiness nationwide."
+            ),
+            "background_image_prompt": "Rocket on launchpad under bright dramatic twilight lighting.",
+            "image_plan": {
+                "brand_name": "The Daily Chronicle",
+                "aspect_ratio": "9:16",
+            },
+            "description": "Verified space milestone update. Like, share and follow",
+            "hashtags": ["#ISRO", "#Space", "#India", "#Science", "#Update"],
+            "sources": [{"url": "https://news.example/isro"}],
+        }
+        _validate_generated_plan(plan)
+
+        plan["image_plan"]["brand_name"] = "Wrong Brand"
+        with self.assertRaisesRegex(ValueError, "The Daily Chronicle"):
+            _validate_generated_plan(plan)
+
+        plan["image_plan"]["brand_name"] = "The Daily Chronicle"
+        plan["image_plan"]["aspect_ratio"] = "1:1"
+        with self.assertRaisesRegex(ValueError, "9:16"):
+            _validate_generated_plan(plan)
+
+    def test_transitions_and_endclip_rotate_round_robin(self):
+        self.assertTrue(10 <= len(REEL_TRANSITIONS) <= 15)
+        self.assertTrue(ENDCLIP_BGM_PATH.is_file())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "reel_rotation.json"
+            seen_transitions = [select_reel_transition(state_file) for _ in range(len(REEL_TRANSITIONS))]
+            self.assertEqual(seen_transitions, list(REEL_TRANSITIONS))
+            self.assertEqual(select_reel_transition(state_file), REEL_TRANSITIONS[0])
+
+            endclips = [select_endclip_video(rotation_state_path=state_file) for _ in range(3)]
+            self.assertTrue(all(clip is not None and clip.is_file() for clip in endclips))
+            self.assertEqual(len({clip.name for clip in endclips}), 3)
+
+    def test_multi_image_pipeline_generates_multiple_cloudflare_images(self):
+        image_prompts = []
+        composed_headlines = []
+        reel_calls = []
+
+        plan = {
+            "selected_story": {
+                "title": "ISRO tests reusable orbital propulsion system",
+                "event_summary": "ISRO completes reusable orbital propulsion system trial in southern India",
+                "url": "https://news.example/isro",
+            },
+            "category": "Science and Space",
+            "headline": "ISRO Tests Reusable Orbital Engine",
+            "image_body": (
+                "ISRO engineers successfully fired the reusable propulsion stage today, "
+                "cutting future launch turnaround costs across upcoming orbital missions."
+            ),
+            "background_image_prompt": "Rocket engine test stand glowing brightly at twilight.",
+            "image_plans": [
+                {
+                    "scene_index": 1,
+                    "brand_name": "The Daily Chronicle",
+                    "aspect_ratio": "9:16",
+                    "headline_text": "ISRO Tests Reusable Orbital Engine",
+                    "short_news_description": "ISRO engineers successfully fired the reusable propulsion stage today, cutting future launch turnaround costs across upcoming orbital missions.",
+                    "background_image_prompt": "Rocket engine test stand glowing brightly at twilight.",
+                    "highlight_words": ["ISRO", "Reusable"],
+                    "colour_palette": {"accent_hex": "#2563EB"},
+                    "text_overlay_layout": {"text_position": "bottom"},
+                },
+                {
+                    "scene_index": 2,
+                    "brand_name": "The Daily Chronicle",
+                    "aspect_ratio": "9:16",
+                    "headline_text": "Lower Launch Costs for India",
+                    "short_news_description": "The reusable architecture prepares upcoming commercial missions for faster turnaround and higher payload efficiency.",
+                    "background_image_prompt": "Modern satellite cleanroom assembly bay with engineers in clean suits.",
+                    "highlight_words": ["Lower", "India"],
+                    "colour_palette": {"accent_hex": "#2563EB"},
+                    "text_overlay_layout": {"text_position": "bottom"},
+                },
+            ],
+            "description": "Verified ISRO propulsion update. Like, share and follow",
+            "hashtags": ["#ISRO", "#Space", "#India", "#Science", "#Rocket"],
+            "sources": [{"url": "https://news.example/isro"}],
+        }
+        plan = _approve_test_plan(plan)
+
+        class FakeAI:
+            def research_and_generate_plan(self, _prompt, _max_tokens, raw_output_path):
+                raw_output_path.write_text(json.dumps(plan), encoding="utf-8")
+                return plan
+
+        class FakeImageGenerator:
+            def __init__(self, _account_id, _api_token, _model):
+                pass
+
+            def generate(self, prompt, output_path):
+                image_prompts.append(prompt)
+                Image.new("RGB", (1024, 1024), color=(20, 60, 120)).save(output_path)
+                return output_path
+
+        def capture_compose(bg, out, headline, body, brand, width, height, **kwargs):
+            composed_headlines.append(headline)
+            out.write_bytes(b"jpg")
+            if kwargs.get("overlay_output_path"):
+                Path(kwargs["overlay_output_path"]).write_bytes(b"png")
+            if kwargs.get("cropped_bg_output_path"):
+                Path(kwargs["cropped_bg_output_path"]).write_bytes(b"jpg")
+            return out
+
+        def capture_reel(image_path, output_path, audio_path, **kwargs):
+            reel_calls.append(kwargs)
+            output_path.write_bytes(b"mp4")
+            return output_path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            headlines_path = output_dir / "shortlisted_headlines.json"
+            headlines_path.write_text("[]", encoding="utf-8")
+            fake_settings = SimpleNamespace(
+                output_dir=output_dir,
+                groq_model="openai/gpt-oss-20b",
+                cloudflare_account_id="test-account",
+                cloudflare_api_token="test-token",
+                cloudflare_model="test-model",
+                brand_name="The Daily Chronicle",
+                cloudinary_settings=None,
+            )
+            with (
+                patch("app.pipeline.settings", fake_settings),
+                patch("app.pipeline.SHORTLISTED_HEADLINES_PATH", headlines_path),
+                patch("app.pipeline._make_ai_client", return_value=FakeAI()),
+                patch("app.pipeline.CloudflareImageGenerator", FakeImageGenerator),
+                patch("app.pipeline.compose_news_image", side_effect=capture_compose),
+                patch("app.pipeline.create_static_reel", side_effect=capture_reel),
+            ):
+                run_dir = run_pipeline()
+
+            summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(image_prompts), 2)
+            self.assertEqual(composed_headlines, ["ISRO Tests Reusable Orbital Engine", "Lower Launch Costs for India"])
+            self.assertEqual(summary["background_images_generated"], 2)
+            self.assertIn(summary["transition"], REEL_TRANSITIONS)
+            self.assertIsNotNone(summary["endclip_file"])
+            self.assertIsNotNone(summary["endclip_bgm_file"])
+            self.assertEqual(len(reel_calls[0]["slides"]), 2)
+
+    def test_multi_image_reel_with_transition_endclip_bgm_and_timeline(self):
+        self.assertTrue(ENDCLIP_BGM_PATH.is_file())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            endclip = select_endclip_video(rotation_state_path=root / "reel_rot.json")
+            self.assertIsNotNone(endclip)
+            slides = []
+            for idx, color in enumerate([(40, 80, 140), (140, 60, 40)], start=1):
+                bg = root / f"bg_{idx}.jpg"
+                still = root / f"news_{idx}.jpg"
+                ov = root / f"ov_{idx}.png"
+                cbg = root / f"cbg_{idx}.jpg"
+                Image.new("RGB", (1024, 1024), color=color).save(bg)
+                compose_news_image(
+                    bg,
+                    still,
+                    f"Milestone Scene {idx} Headline",
+                    "Verified update explaining key facts clearly for Indian viewers across mobile screens.",
+                    "The Daily Chronicle",
+                    category="Science and Space",
+                    overlay_output_path=ov,
+                    cropped_bg_output_path=cbg,
+                )
+                slides.append({"image_path": still, "background_path": cbg, "overlay_path": ov})
+
+            output = root / "multi_reel.mp4"
+            audio = root / "bgm.wav"
+            sample_rate = 44100
+            with wave.open(str(audio), "wb") as track:
+                track.setnchannels(1)
+                track.setsampwidth(2)
+                track.setframerate(sample_rate)
+                track.writeframes(
+                    b"".join(
+                        struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / sample_rate)))
+                        for i in range(sample_rate)
+                    )
+                )
+
+            create_static_reel(
+                slides[0]["image_path"],
+                output,
+                audio,
+                slides=slides,
+                transition="smoothleft",
+                endclip_path=endclip,
+                endclip_bgm_path=ENDCLIP_BGM_PATH,
+                accent_hex="#2563EB",
+            )
+
+            self.assertGreater(output.stat().st_size, 0)
+            ffmpeg = __import__("imageio_ffmpeg").get_ffmpeg_exe()
+            probe = __import__("subprocess").run([ffmpeg, "-i", str(output)], capture_output=True, text=True)
+            self.assertIn("Video:", probe.stderr)
+            self.assertIn("1080x1920", probe.stderr)
+            self.assertIn("21.00", probe.stderr)
+            self.assertIn("Audio:", probe.stderr)
 
 
 if __name__ == "__main__":

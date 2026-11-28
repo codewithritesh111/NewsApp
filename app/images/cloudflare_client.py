@@ -19,7 +19,7 @@ class CloudflareImageGenerator:
         self.url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
         self.headers = {"Authorization": f"Bearer {api_token}"}
 
-    def generate(self, prompt: str, output_path: Path, steps: int = 4) -> Path:
+    def generate(self, prompt: str, output_path: Path, steps: int = 8) -> Path:
         payload = {"prompt": prompt, "steps": max(4, min(int(steps), 8))}
         try:
             response = requests.post(self.url, headers=self.headers, json=payload, timeout=180)

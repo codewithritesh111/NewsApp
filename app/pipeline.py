@@ -9,10 +9,13 @@ from app.config import settings
 from app.images.cloudflare_client import CloudflareImageGenerator
 from app.images.image_composer import compose_news_image
 from app.images.reel_encoder import (
+    ENDCLIP_BGM_PATH,
     REEL_HEIGHT,
     REEL_WIDTH,
     create_static_reel,
     select_bgm_track,
+    select_endclip_video,
+    select_reel_transition,
 )
 from app.intelligence.cloud_ai_client import CloudAIResearcher
 from app.intelligence.credential_pool import AIProviderError, RotatingCredentialPool
@@ -28,6 +31,7 @@ SHORTLISTED_HEADLINES_PATH = Path(__file__).resolve().parents[1] / "shortlisted_
 POSTING_HISTORY_PATH = Path(__file__).resolve().parents[1] / "posting_history.json"
 CREDENTIAL_ROTATION_PATH = Path(__file__).resolve().parents[1] / "credential_rotation.json"
 BGM_ROTATION_PATH = Path(__file__).resolve().parents[1] / "bgm_rotation.json"
+REEL_ROTATION_PATH = Path(__file__).resolve().parents[1] / "reel_rotation.json"
 COOLDOWN_HOURS = 3.0
 MAX_SHORTLISTED_HEADLINES = 15
 INSTAGRAM_CAPTION_LIMIT = 2200
@@ -251,6 +255,10 @@ def _validate_research_result(
         "significance",
         "uniqueness",
         "emotional_resonance",
+        "viral_shareability",
+        "scroll_stop_hook",
+        "mass_relatability",
+        "comment_debate_potential",
     ):
         if field in assessment:
             rating = assessment.get(field)
@@ -268,9 +276,39 @@ def _validate_research_result(
         "cooldown_active",
         "nationwide_impact",
         "is_minor_or_local_incident",
+        "instagram_algorithm_fit",
+        "is_routine_or_low_engagement",
+        "prohibited_content_free",
+        "is_developing_unconfirmed",
+        "extended_48h_window",
     ):
         if field in assessment and type(assessment.get(field)) is not bool:
             raise ValueError(f"Publish assessment {field} must be a boolean.")
+
+    if "viral_score" in assessment:
+        viral_score = assessment["viral_score"]
+        if not isinstance(viral_score, (int, float)) or isinstance(viral_score, bool) or not 0 <= viral_score <= 100:
+            raise ValueError("Publish assessment viral_score must be a number between 0 and 100.")
+
+    if "score_breakdown" in assessment and not isinstance(assessment["score_breakdown"], dict):
+        raise ValueError("Publish assessment score_breakdown must be a JSON object.")
+
+    if "corroborating_sources_count" in assessment:
+        count = assessment["corroborating_sources_count"]
+        if type(count) is not int or count < 0:
+            raise ValueError("Publish assessment corroborating_sources_count must be a non-negative integer.")
+
+    if "confidence_level" in assessment:
+        confidence = assessment["confidence_level"]
+        if not isinstance(confidence, str) or confidence.upper() not in {
+            "LOW", "MODERATE", "MEDIUM", "HIGH", "VERY_HIGH"
+        }:
+            raise ValueError("Publish assessment confidence_level must use a supported rating.")
+
+    if "editorial_risk_flags" in assessment:
+        flags = assessment["editorial_risk_flags"]
+        if not isinstance(flags, (list, str)):
+            raise ValueError("Publish assessment editorial_risk_flags must be a list or string.")
 
     if "cooldown_exception" in assessment:
         exception = assessment["cooldown_exception"]
@@ -283,6 +321,7 @@ def _validate_research_result(
         "human_stakes",
         "india_wide_impact_evidence",
         "emotional_resonance_evidence",
+        "viral_rationale",
     ):
         if field in assessment and not isinstance(assessment.get(field), str):
             raise ValueError(f"Publish assessment {field} must be a string.")
@@ -291,8 +330,6 @@ def _validate_research_result(
     if story is None:
         if assessment["eligible"]:
             raise ValueError("Groq cannot approve publishing when no story was selected.")
-        if unique_count != 0:
-            raise ValueError("Groq must select the highest-ranked current candidate when one exists.")
         return
     if not isinstance(story, dict) or not isinstance(story.get("title"), str) or not story["title"].strip():
         raise ValueError("Groq selected_story must include a non-empty title or be null.")
@@ -348,6 +385,41 @@ def _publish_gate_rejection_reason(
                 "Posting cooldown active: small or isolated crime incidents are excluded during cooldown."
             )
 
+    # Prohibited topic, verification, and 100-point viral score gates
+    if assessment.get("prohibited_content_free") is False:
+        reasons.append(
+            "Story involves prohibited political, religious, communal, or controversial topics."
+        )
+    if assessment.get("is_developing_unconfirmed") is True:
+        reasons.append(
+            "Story is still developing without independent corroboration; skipping publication."
+        )
+    if "viral_score" in assessment:
+        viral_score = assessment["viral_score"]
+        if viral_score < 65:
+            reasons.append(
+                f"Viral potential score ({viral_score}/100) is below the 65-point minimum threshold."
+            )
+        elif posting_cooldown_active and viral_score < 75:
+            reasons.append(
+                f"Posting cooldown active: viral potential score ({viral_score}/100) is below the 75-point high-priority threshold."
+            )
+
+    # Instagram algorithm viral / trending gate (active on every run)
+    if assessment.get("instagram_algorithm_fit") is False:
+        reasons.append(
+            "Story does not fit Instagram Reels trending and algorithmic distribution criteria."
+        )
+    if assessment.get("is_routine_or_low_engagement") is True:
+        reasons.append(
+            "Routine or low-engagement news is excluded; only trending, share-worthy stories are selected."
+        )
+    for viral_field in ("viral_shareability", "scroll_stop_hook", "mass_relatability"):
+        if viral_field in assessment and assessment[viral_field] not in {"HIGH", "VERY_HIGH"}:
+            reasons.append(
+                f"{viral_field.replace('_', ' ').capitalize()} is below the Instagram trending threshold."
+            )
+
     # Legacy rating check: if ratings are present, check if below VERY_HIGH (for backward compatibility)
     required_ratings = {
         "india_wide_relevance",
@@ -374,6 +446,7 @@ def _publish_gate_rejection_reason(
             reasons.append(f"The story lacks {label}.")
 
     event_time_str = assessment.get("actual_event_at")
+    max_age_hours = 48 if assessment.get("extended_48h_window") is True else 24
     if event_time_str is not None:
         event_time = _parse_event_timestamp(event_time_str)
         now = datetime.now(timezone.utc)
@@ -383,8 +456,8 @@ def _publish_gate_rejection_reason(
             event_age = now - event_time
             if event_age < -timedelta(minutes=5):
                 reasons.append("The reported actual event/development timestamp is in the future.")
-            elif event_age > timedelta(hours=24):
-                reasons.append("The actual event/development is older than 24 hours.")
+            elif event_age > timedelta(hours=max_age_hours):
+                reasons.append(f"The actual event/development is older than {max_age_hours} hours.")
 
     story = result.get("selected_story")
     if story is None:
@@ -405,6 +478,62 @@ def _publish_gate_rejection_reason(
             reasons.append("The story substantially overlaps a recent post without a verified significant new development.")
 
     return " ".join(dict.fromkeys(reasons)) or None
+
+
+def _validate_single_image_plan(image_plan: object, label: str = "image_plan") -> None:
+    if not isinstance(image_plan, dict):
+        raise ValueError(f"Groq {label} must be a JSON object when provided.")
+    plan_brand = image_plan.get("brand_name")
+    if plan_brand is not None and (
+        not isinstance(plan_brand, str) or plan_brand.strip() != "The Daily Chronicle"
+    ):
+        raise ValueError(f'Groq {label}.brand_name must be exactly "The Daily Chronicle".')
+    plan_ratio = image_plan.get("aspect_ratio")
+    if plan_ratio is not None and (
+        not isinstance(plan_ratio, str) or plan_ratio.strip() != "9:16"
+    ):
+        raise ValueError(f'Groq {label}.aspect_ratio must be "9:16".')
+    for text_field in ("headline_text", "short_news_description", "background_image_prompt"):
+        if text_field in image_plan:
+            val = image_plan[text_field]
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError(f"Groq {label}.{text_field} must be a non-empty string.")
+
+
+def _extract_slide_specs(plan: dict) -> list[dict]:
+    """Return 1 to 3 normalized slide specs from plan['image_plans'] or top-level fields."""
+    raw_plans = plan.get("image_plans")
+    if isinstance(raw_plans, list) and raw_plans:
+        candidates = raw_plans[:3]
+    elif isinstance(plan.get("image_plan"), dict):
+        candidates = [plan["image_plan"]]
+    else:
+        candidates = [{}]
+
+    slides: list[dict] = []
+    for idx, entry in enumerate(candidates):
+        if not isinstance(entry, dict):
+            entry = {}
+        colour_palette = entry.get("colour_palette") if isinstance(entry.get("colour_palette"), dict) else {}
+        overlay_layout = entry.get("text_overlay_layout") if isinstance(entry.get("text_overlay_layout"), dict) else {}
+        headline_val = entry.get("headline_text") if isinstance(entry.get("headline_text"), str) and entry.get("headline_text").strip() else plan["headline"]
+        body_val = entry.get("short_news_description") if isinstance(entry.get("short_news_description"), str) and entry.get("short_news_description").strip() else plan["image_body"]
+        bg_val = entry.get("background_image_prompt") if isinstance(entry.get("background_image_prompt"), str) and entry.get("background_image_prompt").strip() else plan["background_image_prompt"]
+        highlights = entry.get("highlight_words") if isinstance(entry.get("highlight_words"), list) else plan.get("highlight_words")
+        accent_hex = colour_palette.get("accent_hex") if isinstance(colour_palette.get("accent_hex"), str) else None
+        text_pos = overlay_layout.get("text_position") if isinstance(overlay_layout.get("text_position"), str) else "bottom"
+        slides.append(
+            {
+                "scene_index": idx + 1,
+                "headline": headline_val.strip(),
+                "body": body_val.strip(),
+                "background_prompt": bg_val.strip(),
+                "highlight_words": highlights,
+                "accent_hex": accent_hex,
+                "text_position": text_pos,
+            }
+        )
+    return slides
 
 
 def _validate_generated_plan(
@@ -428,8 +557,23 @@ def _validate_generated_plan(
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"Groq Reel plan must include a non-empty {field}.")
     image_body_words = _summary_word_count(plan["image_body"])
-    if not 25 <= image_body_words <= 45:
-        raise ValueError("Groq image_body must contain 25 to 45 words for a self-contained Reel.")
+    if not 15 <= image_body_words <= 45:
+        raise ValueError("Groq image_body must contain 15 to 45 words for a self-contained Reel.")
+    highlight_words = plan.get("highlight_words")
+    if highlight_words is not None and (
+        not isinstance(highlight_words, list)
+        or any(not isinstance(item, str) for item in highlight_words)
+    ):
+        raise ValueError("Groq highlight_words must be a list of strings when provided.")
+    image_plan = plan.get("image_plan")
+    if image_plan is not None:
+        _validate_single_image_plan(image_plan, "image_plan")
+    image_plans = plan.get("image_plans")
+    if image_plans is not None:
+        if not isinstance(image_plans, list) or not 1 <= len(image_plans) <= 3:
+            raise ValueError("Groq image_plans must contain 1 to 3 image plans when provided.")
+        for idx, item in enumerate(image_plans, start=1):
+            _validate_single_image_plan(item, f"image_plans[{idx - 1}]")
     description = plan["description"].strip()
     if _summary_word_count(description) > 500:
         raise ValueError("Groq description must not exceed 500 words.")
@@ -501,7 +645,11 @@ def _enhance_image_prompt(prompt: str) -> str:
     cleaned = prompt.strip()
     if "bright" in cleaned.casefold() and "attractive" in cleaned.casefold():
         return cleaned
-    return f"{cleaned}, bright vibrant cinematic lighting, attractive and colorful background, rich vivid colors"
+    return (
+        f"{cleaned}, photorealistic editorial photojournalism, bright vibrant cinematic lighting, "
+        "attractive and colorful background, rich vivid colors, center-framed main subject, "
+        "clean lower third for text overlay, sharp focus, zero text, no watermarks or logos"
+    )
 
 
 def _generate_background(
@@ -702,8 +850,15 @@ def run_pipeline(
     image_path = post_dir / "news_image.jpg"
     reel_path = post_dir / "reel.mp4"
     bgm_path: Path | None = None
+    selected_transition: str | None = None
+    endclip_path: Path | None = None
+    endclip_bgm_path: Path | None = None
     if not text_only:
-        log.info("[3/4] Cloudflare generating the story background...")
+        slide_specs = _extract_slide_specs(plan)
+        log.info(
+            "[3/4] Cloudflare generating %d story background image(s)...",
+            len(slide_specs),
+        )
         cloudflare_credentials = getattr(
             settings,
             "cloudflare_credentials",
@@ -714,25 +869,67 @@ def run_pipeline(
             "Cloudflare",
             CREDENTIAL_ROTATION_PATH,
         )
-        background_path = background_dir / "background.jpg"
-        _generate_background(
-            plan["background_image_prompt"].strip(),
-            background_path,
-            credential_pool,
-            settings.cloudflare_model,
-        )
-        compose_news_image(
-            background_path,
-            image_path,
-            headline,
-            plan["image_body"].strip(),
-            settings.brand_name,
-            REEL_WIDTH,
-            REEL_HEIGHT,
-        )
+        rendered_slides: list[dict[str, Path]] = []
+        for idx, spec in enumerate(slide_specs, start=1):
+            bg_file = (
+                background_dir / "background.jpg"
+                if idx == 1
+                else background_dir / f"background_{idx}.jpg"
+            )
+            _generate_background(
+                spec["background_prompt"],
+                bg_file,
+                credential_pool,
+                settings.cloudflare_model,
+            )
+            slide_img = image_path if idx == 1 else post_dir / f"news_image_{idx}.jpg"
+            slide_overlay = (
+                post_dir / "reel_overlay.png"
+                if idx == 1
+                else post_dir / f"reel_overlay_{idx}.png"
+            )
+            slide_bg_crop = (
+                post_dir / "reel_background.jpg"
+                if idx == 1
+                else post_dir / f"reel_background_{idx}.jpg"
+            )
+            compose_news_image(
+                bg_file,
+                slide_img,
+                spec["headline"],
+                spec["body"],
+                settings.brand_name,
+                REEL_WIDTH,
+                REEL_HEIGHT,
+                category=plan["category"],
+                highlight_words=spec["highlight_words"],
+                accent_hex=spec["accent_hex"],
+                text_position=spec["text_position"],
+                overlay_output_path=slide_overlay,
+                cropped_bg_output_path=slide_bg_crop,
+            )
+            rendered_slides.append(
+                {
+                    "image_path": slide_img,
+                    "background_path": slide_bg_crop,
+                    "overlay_path": slide_overlay,
+                }
+            )
         bgm_path = select_bgm_track(plan["category"], rotation_state_path=BGM_ROTATION_PATH)
-        create_static_reel(image_path, reel_path, bgm_path)
-        generated = 1
+        selected_transition = select_reel_transition(rotation_state_path=REEL_ROTATION_PATH)
+        endclip_path = select_endclip_video(rotation_state_path=REEL_ROTATION_PATH)
+        endclip_bgm_path = ENDCLIP_BGM_PATH if ENDCLIP_BGM_PATH.is_file() else None
+        create_static_reel(
+            image_path,
+            reel_path,
+            bgm_path,
+            slides=rendered_slides,
+            transition=selected_transition,
+            endclip_path=endclip_path,
+            endclip_bgm_path=endclip_bgm_path,
+            accent_hex=slide_specs[0].get("accent_hex"),
+        )
+        generated = len(rendered_slides)
         public_video_url = _upload_reel_if_configured(
             reel_path,
             post_dir,
@@ -767,6 +964,9 @@ def run_pipeline(
             "publish_assessment": assessment,
             "publish_decision": "APPROVED",
             "bgm_file": str(bgm_path) if bgm_path else None,
+            "transition": selected_transition,
+            "endclip_file": str(endclip_path) if endclip_path else None,
+            "endclip_bgm_file": str(endclip_bgm_path) if endclip_bgm_path else None,
             "public_video_url": public_video_url,
             "background_images_generated": generated,
             "post_directory": str(post_dir),
