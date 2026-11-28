@@ -74,10 +74,6 @@ class CloudAIResearcher:
             "category",
             "headline",
             "image_body",
-            "image_search_query",
-            "image_url",
-            "layout",
-            "verified_channels",
             "background_image_prompt",
             "description",
             "hashtags",
@@ -235,8 +231,9 @@ class CloudAIResearcher:
                 {
                     "role": "system",
                     "content": (
-                        "You are a fast, precise Indian news researcher. Follow the prompt instructions directly. "
-                        "Use browser_search concisely, synthesize your candidate selection quickly, and output the single requested JSON object without getting trapped in repetitive crawling or reasoning loops."
+                        "You are a careful Indian news researcher. Follow the prompt exactly. "
+                        "Use browser_search; return only the requested single-image Reel JSON. "
+                        "Never invent facts, counts, or sources."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -276,15 +273,15 @@ class CloudAIResearcher:
                         encoding="utf-8",
                     )
                 content = self._content(data)
-                if raw_output_path is not None:
-                    raw_output_path.write_text(content, encoding="utf-8")
                 plan = self._normalize_plan_shape(self._extract_json(content))
                 validator = getattr(self, "plan_validator", None)
                 if validator is not None:
                     try:
                         validator(plan)
                     except ValueError as exc:
-                        raise AIProviderError(f"Groq returned an invalid single-image Reel plan: {exc}") from exc
+                        raise AIProviderError("Groq returned an invalid single-image Reel plan.") from exc
+                if raw_output_path is not None:
+                    raw_output_path.write_text(content, encoding="utf-8")
                 break
             except AIProviderError as exc:
                 last_error = exc

@@ -6,8 +6,6 @@ import tempfile
 import unittest
 import wave
 from datetime import datetime, timedelta, timezone
-
-os.environ["SKIP_WEB_RECENCY_CHECK"] = "1"
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -101,6 +99,7 @@ class TrendPipelineTests(unittest.TestCase):
         self.assertIn("last 3 hrs", prompt.lower())
         self.assertIn("the daily chronicle", prompt.lower())
         self.assertIn("like, share and follow", prompt.lower())
+        self.assertIn("see description for more detail", prompt.lower())
         for category in (
             "Crime",
             "Politics",
@@ -908,6 +907,7 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertIn("500 words", prompt.lower())
             self.assertIn("like, share and follow", prompt.lower())
             self.assertIn("the daily chronicle", prompt.lower())
+            self.assertIn("see description for more detail", prompt.lower())
             self.assertIn("last 15 news posted", prompt.lower())
             self.assertIn("compare distinctive people, organizations", prompt.lower())
             self.assertIn("5-15 relevant hashtags", prompt.lower())
@@ -1158,11 +1158,11 @@ class TrendPipelineTests(unittest.TestCase):
             self.assertEqual(t3.name, "The Complex.mp3")
             self.assertEqual(t4.name, "Division.mp3")
 
-            # BreakingNews (Dramatic News Pulse.mp3, Epical Drums.mp3, News Theme.mp3, Stormfront.mp3, Volatile Reaction.mp3)
+            # BreakingNews (News Theme.mp3, Stormfront.mp3, Volatile Reaction.mp3)
             b1 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
             b2 = select_bgm_track("BreakingNews", rotation_state_path=state_path)
-            self.assertEqual(b1.name, "Dramatic News Pulse.mp3")
-            self.assertEqual(b2.name, "Epical Drums.mp3")
+            self.assertEqual(b1.name, "News Theme.mp3")
+            self.assertEqual(b2.name, "Stormfront.mp3")
 
             # Other remains unchanged as Other.m4a
             self.assertEqual(select_bgm_track("Other", rotation_state_path=state_path).name, "Other.m4a")

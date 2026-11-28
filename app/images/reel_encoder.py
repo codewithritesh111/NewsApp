@@ -1,5 +1,4 @@
 import json
-import re
 import subprocess
 from pathlib import Path
 
@@ -14,23 +13,11 @@ SUPPORTED_AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 
 
 CATEGORY_BGM_ALIASES = {
-    "shockingcrime": "Crime",
-    "naturaldisaster": "Disaster",
-    "majorachievement": "Achievement",
-    "celebritysports": "Trends",
-    "sciencetech": "Business",
-    "unusual": "Trends",
-    "disaster": "Disaster",
-    "emergencyreporting": "EmergencyReporting",
-    "trends": "Trends",
-    "achievement": "Achievement",
-    "breakingnews": "BreakingNews",
-    "technology": "Other",
-    "defence": "BreakingNews",
-    "majorgoodevent": "Achievement",
-    "majorsadevent": "Disaster",
-    "governmentschemes": "Government schemes",
-    "socialtrends": "Trends",
+    "disaster": "Major Sad Event",
+    "emergencyreporting": "Major Sad Event",
+    "trends": "Social trends",
+    "achievement": "Other",
+    "breakingnews": "Other",
 }
 
 
@@ -215,169 +202,4 @@ def create_static_reel(image_path: Path, output_path: Path, audio_path: Path) ->
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg Reel encoding failed:\n{result.stderr}")
-    return output_path
-
-
-def inspect_video_details(video_path: Path | str) -> dict:
-    """Inspect a video file and return detailed metadata (duration, audio, dims, aspect ratio)."""
-    video_path = Path(video_path)
-    try:
-        import imageio_ffmpeg
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return {
-            "duration": 20.0,
-            "has_audio": False,
-            "width": 1080,
-            "height": 1920,
-            "aspect_ratio": 1920 / 1080,
-            "is_9_16": True,
-        }
-
-    command = [ffmpeg_exe, "-hide_banner", "-i", str(video_path.resolve())]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    output = result.stderr or ""
-
-    duration = 20.0 if not video_path.is_file() else 0.0
-    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
-    if match:
-        h, m, s = match.groups()
-        duration = int(h) * 3600 + int(m) * 60 + float(s)
-
-    has_audio = bool(re.search(r"Stream\s*#\d+:\d+.*Audio:", output))
-
-    width, height = 1080, 1920
-    dim_match = re.search(r"Stream\s*#\d+:\d+.*Video:.*?(\d{2,5})x(\d{2,5})", output)
-    if dim_match:
-        width = int(dim_match.group(1))
-        height = int(dim_match.group(2))
-
-    aspect_ratio = height / max(1, width)
-    is_9_16 = height >= width or "9:16" in output or aspect_ratio >= 1.0
-
-    return {
-        "duration": max(0.0, duration),
-        "has_audio": has_audio,
-        "width": width,
-        "height": height,
-        "aspect_ratio": aspect_ratio,
-        "is_9_16": is_9_16,
-    }
-
-
-def inspect_video(video_path: Path | str) -> tuple[float, bool]:
-    """Inspect a video file and return (duration_in_seconds, has_audio_stream)."""
-    details = inspect_video_details(video_path)
-    return max(0.1, details["duration"]), details["has_audio"]
-
-
-def create_video_reel(
-    video_path: Path | str,
-    overlay_path: Path | str,
-    output_path: Path | str,
-    bgm_path: Path | str | None = None,
-) -> Path:
-    """Superimpose text overlay on video without trimming, requiring duration between 20s and 60s."""
-    video_path = Path(video_path)
-    overlay_path = Path(overlay_path)
-    output_path = Path(output_path)
-    bgm_path = Path(bgm_path) if bgm_path else None
-    if not video_path.is_file():
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-    if not overlay_path.is_file():
-        raise FileNotFoundError(f"Overlay image not found: {overlay_path}")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        import imageio_ffmpeg
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    except ImportError as exc:
-        raise RuntimeError("Video Reel encoding requires imageio-ffmpeg.") from exc
-
-    raw_duration, has_audio = inspect_video(video_path)
-
-    # Strictly require video duration between 20 sec and 1 min (60 sec)
-    if raw_duration < 20.0 or raw_duration > 60.0:
-        raise ValueError(
-            f"Video duration {raw_duration:.1f}s is outside required [20s, 60s] range. "
-            "Only news videos with length strictly between 20 seconds and 1 minute can be used."
-        )
-
-    # No need to trim video: preserve full duration as-is without looping
-    target_duration = round(raw_duration, 2)
-
-    filter_complex = (
-        f"[0:v]scale={REEL_WIDTH}:{REEL_HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={REEL_WIDTH}:{REEL_HEIGHT}[vbg];"
-        f"[vbg][1:v]overlay=0:0:format=auto[vout]"
-    )
-
-    if has_audio:
-        # Keep original audio, do not add BGM, do not loop or trim video
-        command = [
-            ffmpeg_exe,
-            "-y",
-            "-i", str(video_path.resolve()),
-            "-i", str(overlay_path.resolve()),
-            "-t", str(target_duration),
-            "-filter_complex", filter_complex,
-            "-map", "[vout]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "20",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-ar", "44100",
-            "-r", str(REEL_FRAME_RATE),
-            "-movflags", "+faststart",
-            str(output_path.resolve()),
-        ]
-    else:
-        # Silent video, add BGM (BGM loops if shorter than video, fades out at video end)
-        if bgm_path and bgm_path.is_file():
-            fade_start = max(0.0, target_duration - 1.0)
-            audio_filter = f"[2:a]afade=t=out:st={fade_start:.2f}:d=1.0[aout]"
-            full_filter = f"{filter_complex};{audio_filter}"
-            command = [
-                ffmpeg_exe,
-                "-y",
-                "-i", str(video_path.resolve()),
-                "-i", str(overlay_path.resolve()),
-                "-stream_loop", "-1",
-                "-i", str(bgm_path.resolve()),
-                "-t", str(target_duration),
-                "-filter_complex", full_filter,
-                "-map", "[vout]",
-                "-map", "[aout]",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "20",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-ar", "44100",
-                "-r", str(REEL_FRAME_RATE),
-                "-movflags", "+faststart",
-                str(output_path.resolve()),
-            ]
-        else:
-            command = [
-                ffmpeg_exe,
-                "-y",
-                "-i", str(video_path.resolve()),
-                "-i", str(overlay_path.resolve()),
-                "-t", str(target_duration),
-                "-filter_complex", filter_complex,
-                "-map", "[vout]",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "20",
-                "-r", str(REEL_FRAME_RATE),
-                "-movflags", "+faststart",
-                str(output_path.resolve()),
-            ]
-
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg Video Reel encoding failed:\n{result.stderr}")
     return output_path
